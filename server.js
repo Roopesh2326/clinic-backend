@@ -29,7 +29,7 @@ app.post("/appointment", (req, res) => {
   const data = req.body;
   appointments.push(data);
 
-  fs.writeFileSync(filePath, JSON,stringify(appointments, null, 2));
+  fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
 
   res.json({ message: "Appointment saved successfully" });
 });
@@ -38,15 +38,14 @@ app.get("/appointments", (req, res) => {
   res.json(appointments);
 });
 
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
-});
-
-
 // ✅ GET NOTICE
 app.get("/notice", async (req, res) => {
   const notice = await Notice.findOne();
   res.json(notice);
+});
+
+app.listen(5000, () => {
+  console.log("Server running on port 5000");
 });
 
 // ✅ UPDATE NOTICE
