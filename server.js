@@ -5,22 +5,25 @@ const fs = require("fs");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
+
 const Notice = require("./models/Notice");
 const User = require("./models/User");
 
 const app = express();
 
+// ✅ FIXED CORS (important)
 app.use(cors({
-  origin: "http://localhost:3000", // or your frontend URL
+  origin: ["http://localhost:3000", "https://clinic-frontend-rho.vercel.app"],
   credentials: true
 }));
+
 app.use(express.json());
 app.use(cookieParser());
 
-// JWT Secret
-const JWT_SECRET = "your_jwt_secret_key"; // Change this to a secure key
+// ✅ JWT Secret
+const JWT_SECRET = "your_jwt_secret_key";
 
-// Middleware to verify JWT
+// 🔐 AUTH MIDDLEWARE
 const authenticateToken = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ message: "Access denied" });
@@ -32,12 +35,26 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Middleware to check admin role
 const requireAdmin = (req, res, next) => {
-  if (req.user.role !== "admin") return res.status(403).json({ message: "Admin access required" });
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ message: "Admin access required" });
+  }
   next();
 };
 
+// ✅ CONNECT DATABASE (FIXED)
+mongoose.connect(
+  "mongodb+srv://roopeshdeep:32Qwerfdsa@cluster0.00b27mo.mongodb.net/clinicDB"
+)
+.then(() => console.log("MongoDB connected ✅"))
+.catch((error) => console.log("MongoDB error ❌", error));
+
+// ✅ TEST ROUTE
+app.get("/", (req, res) => {
+  res.send("Backend working ✅");
+});
+
+// ✅ GET USERS
 app.get("/users", async (req, res) => {
   console.log("Users API hit");
   try {
@@ -46,18 +63,13 @@ app.get("/users", async (req, res) => {
     res.json(users);
   } catch (err) {
     console.log(err);
-    res.status(500).json({ message: "Error fetching users"});
+    res.status(500).json({ message: "Error fetching users" });
   }
 });
 
-//connect database 
-mongoose.connect("mongodb+srv://roopeshdeep:32Qwerfdsa@cluster0.00b27mo.mongodb.net/?appName=Cluster0")
-.then(() => console.log("MongoDB connected"))
-.catch((error) => console.log(error));
-
+// 📁 LOCAL FILE STORAGE
 const filePath = "appointments.json";
 
-//read existing data
 let appointments = [];
 
 if (fs.existsSync(filePath)) {
@@ -65,46 +77,76 @@ if (fs.existsSync(filePath)) {
   appointments = JSON.parse(data);
 }
 
-// Register
+// ✅ REGISTER
 app.post("/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
+
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ name, email, phone, password: hashedPassword, role: role || "user" });
+
+    const user = new User({
+      name,
+      email,
+      phone,
+      password: hashedPassword,
+      role: role || "user"
+    });
+
     await user.save();
+
     res.json({ message: "User registered successfully" });
+
   } catch (error) {
-    res.status(400).json({ message: "Error registering user", error });
+    console.log(error);
+    res.status(400).json({ message: "Error registering user" });
   }
 });
 
-// Login
+// ✅ LOGIN
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
+
   try {
     const user = await User.findOne({ email });
+
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
-    const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: "1h" });
-    res.cookie("token", token, { httpOnly: true, secure: false }); // Set secure: true in production
-    res.json({ message: "Login successful", role: user.role });
+
+    const token = jwt.sign(
+      { id: user._id, role: user.role },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: false, // ⚠️ change to true in production (HTTPS)
+    });
+
+    res.json({
+      message: "Login successful",
+      role: user.role
+    });
+
   } catch (error) {
-    res.status(500).json({ message: "Error logging in", error });
+    console.log(error);
+    res.status(500).json({ message: "Error logging in" });
   }
 });
 
-// Logout
+// ✅ LOGOUT
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
   res.json({ message: "Logged out" });
 });
 
-// Protected route example
+// ✅ PROTECTED TEST
 app.get("/protected", authenticateToken, (req, res) => {
-  res.json({ message: "This is protected", user: req.user });
+  res.json({ message: "Protected route working", user: req.user });
 });
 
+// ✅ APPOINTMENT
 app.post("/appointment", (req, res) => {
   const data = req.body;
   appointments.push(data);
@@ -124,10 +166,6 @@ app.get("/notice", async (req, res) => {
   res.json(notice);
 });
 
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
-});
-
 // ✅ UPDATE NOTICE
 app.post("/notice", async (req, res) => {
   const { message } = req.body;
@@ -143,4 +181,9 @@ app.post("/notice", async (req, res) => {
   }
 
   res.json({ message: "Notice updated" });
+});
+
+// ✅ START SERVER
+app.listen(5000, () => {
+  console.log("Server running on port 5000 🚀");
 });
