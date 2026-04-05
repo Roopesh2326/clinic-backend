@@ -13,7 +13,7 @@ const app = express();
 
 // ✅ FIXED CORS (important)
 app.use(cors({
-  origin: ["http://localhost:3000", "https://clinic-frontend-rho.vercel.app"],
+  origin: ["https://clinic-frontend-rho.vercel.app"],
   credentials: true
 }));
 
@@ -56,13 +56,15 @@ app.get("/", (req, res) => {
 
 // ✅ GET USERS
 app.get("/users", async (req, res) => {
-  console.log("Users API hit");
   try {
     const users = await User.find();
-    console.log(users);
+
+    if (!users) {
+      return res.json([]);
+    }
     res.json(users);
   } catch (err) {
-    console.log(err);
+    console.log("ERROR IN USERS:", err);
     res.status(500).json({ message: "Error fetching users" });
   }
 });
