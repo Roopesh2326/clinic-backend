@@ -13,7 +13,7 @@ const app = express();
 
 // ✅ FIXED CORS (important)
 app.use(cors({
-  origin: ["https://clinic-frontend-rho.vercel.app"],
+  origin: ["http://localhost:3000", "https://clinic-frontend-rho.vercel.app"],
   credentials: true
 }));
 
