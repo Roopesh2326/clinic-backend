@@ -55,9 +55,9 @@ app.get("/", (req, res) => {
 });
 
 // ✅ GET USERS
-app.get("/users", async (req, res) => {
+app.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const users = await User.find();
+    const users = await User.find().select("-password");
 
     if (!users) {
       return res.json([]);
@@ -66,6 +66,38 @@ app.get("/users", async (req, res) => {
   } catch (err) {
     console.log("ERROR IN USERS:", err);
     res.status(500).json({ message: "Error fetching users" });
+  }
+});
+
+// ✅ FORGOT PASSWORD (email + phone verification)
+app.post("/forgot-password", async (req, res) => {
+  const { email, phone, newPassword } = req.body;
+
+  if (!email || !phone || !newPassword) {
+    return res.status(400).json({ message: "All fields are required" });
+  }
+
+  if (String(newPassword).length < 6) {
+    return res.status(400).json({ message: "Password must be at least 6 characters" });
+  }
+
+  try {
+    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (String(user.phone).trim() !== String(phone).trim()) {
+      return res.status(401).json({ message: "Phone number does not match" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    return res.json({ message: "Password reset successful" });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({ message: "Failed to reset password" });
   }
 });
 
@@ -166,24 +198,41 @@ app.get("/appointments", authenticateToken, requireAdmin, (req, res) => {
 // ✅ GET NOTICE
 app.get("/notice", async (req, res) => {
   const notice = await Notice.findOne();
+  if (!notice) return res.json(null);
+
+  if (notice.expiresAt && new Date(notice.expiresAt) <= new Date()) {
+    await Notice.deleteOne({ _id: notice._id });
+    return res.json(null);
+  }
+
   res.json(notice);
 });
 
 // ✅ UPDATE NOTICE
-app.post("/notice", async (req, res) => {
-  const { message } = req.body;
+app.post("/notice", authenticateToken, requireAdmin, async (req, res) => {
+  const { message, expiresInHours } = req.body;
+  const parsedHours = Number(expiresInHours || 0);
+  const expiresAt =
+    parsedHours > 0 ? new Date(Date.now() + parsedHours * 60 * 60 * 1000) : null;
 
   let notice = await Notice.findOne();
 
   if (notice) {
     notice.message = message;
+    notice.expiresAt = expiresAt;
     await notice.save();
   } else {
-    notice = new Notice({ message });
+    notice = new Notice({ message, expiresAt });
     await notice.save();
   }
 
   res.json({ message: "Notice updated" });
+});
+
+// ✅ DELETE NOTICE (admin only)
+app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
+  await Notice.deleteMany({});
+  res.json({ message: "Notice deleted" });
 });
 
 // ✅ START SERVER
