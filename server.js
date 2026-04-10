@@ -468,15 +468,23 @@ app.get("/notifications", authenticateToken, (req, res) => {
     "Access-Control-Allow-Headers": "Cache-Control"
   });
 
+  // Store user role on the response object for targeted notifications
+  res.user = req.user;
+
   // Add connection to active connections
   activeConnections.add(res);
 
+  console.log(`New notification connection: ${req.user.email} (${req.user.role})`);
+  console.log(`Total active connections: ${activeConnections.size}`);
+
   // Send initial connection message
-  res.write(`data: ${JSON.stringify({ type: "connected", message: "Connected to notifications" })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: "connected", message: "Connected to notifications", role: req.user.role })}\n\n`);
 
   // Remove connection on client disconnect
   req.on("close", () => {
     activeConnections.delete(res);
+    console.log(`Notification connection closed: ${req.user.email} (${req.user.role})`);
+    console.log(`Total active connections: ${activeConnections.size}`);
   });
 
   // Keep connection alive
@@ -491,11 +499,19 @@ app.get("/notifications", authenticateToken, (req, res) => {
 
 // Helper function to broadcast notifications
 const broadcastNotification = (notification, targetRole = "all") => {
+  console.log(`Broadcasting notification to ${targetRole}:`, notification);
+  let sentCount = 0;
+  
   activeConnections.forEach((res) => {
-    if (targetRole === "all" || res.user?.role === targetRole) {
+    const userRole = res.user?.role;
+    if (targetRole === "all" || userRole === targetRole) {
       res.write(`data: ${JSON.stringify(notification)}\n\n`);
+      sentCount++;
+      console.log(`Notification sent to: ${res.user?.email} (${userRole})`);
     }
   });
+  
+  console.log(`Total notifications sent: ${sentCount}/${activeConnections.size}`);
 };
 
 // Enhanced order creation with notification and email
