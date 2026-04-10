@@ -5,6 +5,7 @@ const fs = require("fs");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
+const Order = require("./models/Order");
 
 const Notice = require("./models/Notice");
 const User = require("./models/User");
@@ -239,3 +240,31 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
 app.listen(5000, () => {
   console.log("Server running on port 5000 🚀");
 });
+
+// ✅ CREATE ORDER (user)
+app.post("/orders", authenticateToken, async (req, res) => {
+  try {
+    const order = new Order({
+      userId: req.user.id,
+      items: req.body.items,
+      total: req.body.total
+    });
+    await order.save();
+    res.json({ message: "Order saved", order });
+  } catch (err) {
+    console.error("Error saving order:", err);
+    res.status(500).json({ message: "Error saving order" });
+  }
+});
+
+// ✅ GET ALL ORDERS (admin)
+app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const orders = await Order.find().populate("userId", "name email");
+    res.json(orders);
+  } catch (err) {
+    console.error("Error fetching orders:", err);
+    res.status(500).json({ message: "Error fetching orders" });
+  }
+});
+
