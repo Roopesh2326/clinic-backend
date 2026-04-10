@@ -14,7 +14,7 @@ const app = express();
 
 // ✅ FIXED CORS (important)
 app.use(cors({
-  origin: "true", 
+  origin: true, 
   // ["http://localhost:3000", "https://clinic-frontend-rho.vercel.app", "https://clinic-frontend-8s9recgc6-roopesh2326s-projects.vercel.app"],
   credentials: true
 }));
@@ -172,7 +172,6 @@ app.post("/login", async (req, res) => {
   }
 });
 
-res.header("Access-control-allow-origin", true);
 // ✅ LOGOUT
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
