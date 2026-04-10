@@ -245,12 +245,16 @@ app.listen(5000, () => {
 // ✅ CREATE ORDER (user)
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
-    const order = new Order({
+    console.log("USER:" , req.user.id);
+    console.log("BODY:" , req.body);
+
+    const order  = new Order({
       userId: req.user.id,
       items: req.body.items,
       total: req.body.total
     });
     await order.save();
+    console.log("ORDER SAVED: ", order );
     res.json({ message: "Order saved", order });
   } catch (err) {
     console.error("Error saving order:", err);
