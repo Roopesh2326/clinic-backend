@@ -1,3 +1,4 @@
+require("dotenv").config();
 const mongoose = require("mongoose");
 const express = require("express");
 const cors = require("cors");
@@ -13,6 +14,14 @@ const { sendOrderConfirmationEmail, sendOrderStatusUpdateEmail, sendNewOrderNoti
 
 const app = express();
 
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/clinicDB", {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log("Connected to MongoDB"))
+.catch((err) => console.error("MongoDB connection error:", err));
+
 // ✅ FIXED CORS (important)
 app.use(cors({
   origin: true, 
@@ -23,8 +32,8 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-// ✅ JWT Secret
-const JWT_SECRET = "your_jwt_secret_key";
+// JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_key";
 
 // 🔐 AUTH MIDDLEWARE
 const authenticateToken = (req, res, next) => {
@@ -44,13 +53,6 @@ const requireAdmin = (req, res, next) => {
   }
   next();
 };
-
-// ✅ CONNECT DATABASE (FIXED)
-mongoose.connect(
-  "mongodb+srv://roopeshdeep:32Qwerfdsa@cluster0.00b27mo.mongodb.net/clinicDB"
-)
-.then(() => console.log("MongoDB connected ✅"))
-.catch((error) => console.log("MongoDB error ❌", error));
 
 // ✅ TEST ROUTE
 app.get("/", (req, res) => {
@@ -238,10 +240,6 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
   res.json({ message: "Notice deleted" });
 });
 
-// ✅ START SERVER
-app.listen(5000, () => {
-  console.log("Server running on port 5000 🚀");
-});
 
 // ✅ CREATE ORDER (user)
 app.post("/orders", authenticateToken, async (req, res) => {
@@ -615,4 +613,10 @@ app.put("/orders/:orderId/status", authenticateToken, requireAdmin, async (req, 
     console.error("Error updating order status:", err);
     res.status(500).json({ message: "Error updating order status" });
   }
+});
+
+// START SERVER
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
