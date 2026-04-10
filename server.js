@@ -172,6 +172,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
+res.header("Access-control-allow-origin", true);
 // ✅ LOGOUT
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
