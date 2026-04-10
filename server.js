@@ -6,9 +6,10 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
 const Order = require("./models/Order");
-
 const Notice = require("./models/Notice");
 const User = require("./models/User");
+const Medicine = require("./models/Medicine");
+const { sendOrderConfirmationEmail, sendOrderStatusUpdateEmail, sendNewOrderNotificationEmail } = require("./services/emailService");
 
 const app = express();
 
@@ -273,3 +274,329 @@ app.get("/my-orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// GET USER ORDERS (for logged-in user)
+app.get("/user-orders", authenticateToken, async (req, res) => {
+  try {
+    const orders = await Order.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (err) {
+    console.error("Error fetching user orders:", err);
+    res.status(500).json({ message: "Error fetching orders" });
+  }
+});
+
+// UPDATE ORDER STATUS (admin only)
+app.put("/orders/:orderId/status", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled"];
+    
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const order = await Order.findByIdAndUpdate(
+      req.params.orderId,
+      { status },
+      { new: true }
+    ).populate("userId", "name email");
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.json({ message: "Order status updated", order });
+  } catch (err) {
+    console.error("Error updating order status:", err);
+    res.status(500).json({ message: "Error updating order status" });
+  }
+});
+
+// MEDICINE MANAGEMENT ENDPOINTS
+
+// GET ALL MEDICINES (with search and filter)
+app.get("/medicines", async (req, res) => {
+  try {
+    const { search, category, minPrice, maxPrice, sortBy = "name", order = "asc" } = req.query;
+    
+    let query = { active: true };
+    
+    if (search) {
+      query.$text = { $search: search };
+    }
+    
+    if (category) {
+      query.category = category;
+    }
+    
+    if (minPrice || maxPrice) {
+      query.price = {};
+      if (minPrice) query.price.$gte = parseFloat(minPrice);
+      if (maxPrice) query.price.$lte = parseFloat(maxPrice);
+    }
+
+    const sortOptions = {};
+    sortOptions[sortBy] = order === "desc" ? -1 : 1;
+
+    const medicines = await Medicine.find(query)
+      .sort(sortOptions)
+      .select("-__v");
+
+    res.json(medicines);
+  } catch (err) {
+    console.error("Error fetching medicines:", err);
+    res.status(500).json({ message: "Error fetching medicines" });
+  }
+});
+
+// ADD MEDICINE (admin only)
+app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const medicine = new Medicine(req.body);
+    await medicine.save();
+    res.json({ message: "Medicine added successfully", medicine });
+  } catch (err) {
+    console.error("Error adding medicine:", err);
+    res.status(500).json({ message: "Error adding medicine" });
+  }
+});
+
+// UPDATE MEDICINE (admin only)
+app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const medicine = await Medicine.findByIdAndUpdate(
+      req.params.id,
+      { ...req.body, updatedAt: Date.now() },
+      { new: true }
+    );
+
+    if (!medicine) {
+      return res.status(404).json({ message: "Medicine not found" });
+    }
+
+    res.json({ message: "Medicine updated successfully", medicine });
+  } catch (err) {
+    console.error("Error updating medicine:", err);
+    res.status(500).json({ message: "Error updating medicine" });
+  }
+});
+
+// DELETE MEDICINE (admin only)
+app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const medicine = await Medicine.findByIdAndUpdate(
+      req.params.id,
+      { active: false },
+      { new: true }
+    );
+
+    if (!medicine) {
+      return res.status(404).json({ message: "Medicine not found" });
+    }
+
+    res.json({ message: "Medicine deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting medicine:", err);
+    res.status(500).json({ message: "Error deleting medicine" });
+  }
+});
+
+// ANALYTICS ENDPOINTS (admin only)
+
+app.get("/analytics/overview", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const totalRevenue = await Order.aggregate([
+      { $match: { status: { $ne: "Cancelled" } } },
+      { $group: { _id: null, total: { $sum: "$total" } } }
+    ]);
+
+    const totalOrders = await Order.countDocuments();
+    const ordersByStatus = await Order.aggregate([
+      { $group: { _id: "$status", count: { $sum: 1 } } }
+    ]);
+
+    const recentOrders = await Order.find()
+      .populate("userId", "name email")
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    const lowStockMedicines = await Medicine.find({
+      active: true,
+      stock: { $lt: 10 }
+    }).select("name stock category");
+
+    res.json({
+      totalRevenue: totalRevenue[0]?.total || 0,
+      totalOrders,
+      ordersByStatus: ordersByStatus.reduce((acc, item) => {
+        acc[item._id] = item.count;
+        return acc;
+      }, {}),
+      recentOrders,
+      lowStockMedicines
+    });
+  } catch (err) {
+    console.error("Error fetching analytics:", err);
+    res.status(500).json({ message: "Error fetching analytics" });
+  }
+});
+
+// GET MEDICINE CATEGORIES
+app.get("/medicines/categories", async (req, res) => {
+  try {
+    const categories = await Medicine.distinct("category", { active: true });
+    res.json(categories);
+  } catch (err) {
+    console.error("Error fetching categories:", err);
+    res.status(500).json({ message: "Error fetching categories" });
+  }
+});
+
+// REAL-TIME NOTIFICATIONS (Server-Sent Events)
+const activeConnections = new Set();
+
+app.get("/notifications", authenticateToken, (req, res) => {
+  const isUser = req.user.role === "user";
+  const isAdmin = req.user.role === "admin";
+
+  // Set SSE headers
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Cache-Control"
+  });
+
+  // Add connection to active connections
+  activeConnections.add(res);
+
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({ type: "connected", message: "Connected to notifications" })}\n\n`);
+
+  // Remove connection on client disconnect
+  req.on("close", () => {
+    activeConnections.delete(res);
+  });
+
+  // Keep connection alive
+  const heartbeat = setInterval(() => {
+    res.write(": heartbeat\n\n");
+  }, 30000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+  });
+});
+
+// Helper function to broadcast notifications
+const broadcastNotification = (notification, targetRole = "all") => {
+  activeConnections.forEach((res) => {
+    if (targetRole === "all" || res.user?.role === targetRole) {
+      res.write(`data: ${JSON.stringify(notification)}\n\n`);
+    }
+  });
+};
+
+// Enhanced order creation with notification and email
+app.post("/orders", authenticateToken, async (req, res) => {
+  try {
+    console.log("USER:" , req.user.id);
+    console.log("BODY:" , req.body);
+
+    // Get user details for email
+    const user = await User.findById(req.user.id);
+    
+    const order = new Order({
+      userId: req.user.id,
+      items: req.body.items,
+      total: req.body.total,
+      paymentMethod: req.body.paymentMethod || "cash"
+    });
+    await order.save();
+    console.log("ORDER SAVED: ", order );
+
+    // Send email confirmation to user (async, don't wait)
+    if (user && user.email) {
+      sendOrderConfirmationEmail(user.email, order).catch(err => {
+        console.log("Failed to send order confirmation email:", err);
+      });
+    }
+
+    // Send notification to admin users (async, don't wait)
+    User.find({ role: "admin" }).then(adminUsers => {
+      adminUsers.forEach(admin => {
+        if (admin.email) {
+          sendNewOrderNotificationEmail(admin.email, order, user?.name || "Unknown").catch(err => {
+            console.log("Failed to send admin notification:", err);
+          });
+        }
+      });
+    }).catch(err => {
+      console.log("Error finding admin users:", err);
+    });
+
+    // Broadcast new order notification to admins
+    broadcastNotification({
+      type: "new_order",
+      message: "New order received!",
+      data: {
+        orderId: order._id,
+        userId: order.userId,
+        total: order.total,
+        timestamp: new Date().toISOString()
+      }
+    }, "admin");
+
+    res.json({ message: "Order saved", order });
+  } catch (err) {
+    console.error("Error saving order:", err);
+    res.status(500).json({ message: "Error saving order" });
+  }
+});
+
+// Enhanced order status update with notification and email
+app.put("/orders/:orderId/status", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled"];
+    
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const order = await Order.findByIdAndUpdate(
+      req.params.orderId,
+      { status },
+      { new: true }
+    ).populate("userId", "name email");
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Send email notification to user (async, don't wait)
+    if (order.userId && order.userId.email) {
+      sendOrderStatusUpdateEmail(order.userId.email, order, status).catch(err => {
+        console.log("Failed to send status update email:", err);
+      });
+    }
+
+    // Broadcast status update notification to the specific user
+    broadcastNotification({
+      type: "order_status_update",
+      message: `Order status updated to ${status}`,
+      data: {
+        orderId: order._id,
+        newStatus: status,
+        userId: order.userId._id,
+        timestamp: new Date().toISOString()
+      }
+    }, "user");
+
+    res.json({ message: "Order status updated", order });
+  } catch (err) {
+    console.error("Error updating order status:", err);
+    res.status(500).json({ message: "Error updating order status" });
+  }
+});
