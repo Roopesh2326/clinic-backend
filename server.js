@@ -259,7 +259,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
 });
 
 // ✅ GET ALL ORDERS (admin)
-app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
+app.get("/my-orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find().populate("userId", "name email");
     res.json(orders);
