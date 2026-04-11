@@ -12,14 +12,13 @@ const User = require("./models/User");
 
 const app = express();
 
-// ✅ CORS
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
-// ✅ SINGLE DB CONNECTION (removed duplicate)
+// ✅ SINGLE DB CONNECTION
 mongoose
   .connect(
     process.env.MONGODB_URI ||
@@ -46,10 +45,7 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// ─────────────────────────────────────────
-// ✅ ALL ROUTES DEFINED BEFORE app.listen()
-// ─────────────────────────────────────────
-
+// ─── TEST ─────────────────────────────────
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
 // ─── AUTH ────────────────────────────────
@@ -176,8 +172,14 @@ app.post("/notice", authenticateToken, requireAdmin, async (req, res) => {
   const parsedHours = Number(expiresInHours || 0);
   const expiresAt = parsedHours > 0 ? new Date(Date.now() + parsedHours * 3600000) : null;
   let notice = await Notice.findOne();
-  if (notice) { notice.message = message; notice.expiresAt = expiresAt; await notice.save(); }
-  else { notice = new Notice({ message, expiresAt }); await notice.save(); }
+  if (notice) {
+    notice.message = message;
+    notice.expiresAt = expiresAt;
+    await notice.save();
+  } else {
+    notice = new Notice({ message, expiresAt });
+    await notice.save();
+  }
   res.json({ message: "Notice updated" });
 });
 
@@ -206,16 +208,11 @@ app.post("/orders", authenticateToken, async (req, res) => {
     });
 
     await order.save();
-
-    // Populate userId for the response so frontend gets full details
     await order.populate("userId", "name email phone");
 
     console.log("✅ Order saved:", order._id, "| User:", req.user.id, "| Total:", total);
 
-    res.status(201).json({
-      message: "Order placed successfully",
-      order,
-    });
+    res.status(201).json({ message: "Order placed successfully", order });
 
   } catch (err) {
     console.error("❌ Error saving order:", err);
@@ -237,11 +234,17 @@ app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // GET /orders/my — logged in user gets ONLY their own orders
-// ⚠️ This must be defined BEFORE /orders/:id to avoid route conflict
+// ✅ MUST be defined BEFORE /orders/:id — otherwise Express treats "my" as an id param
 app.get("/orders/my", authenticateToken, async (req, res) => {
   try {
-    const orders = await Order.find({ userId: req.user.id })
+    // ✅ KEY FIX: convert JWT string id to ObjectId so MongoDB query matches correctly
+    const userId = new mongoose.Types.ObjectId(req.user.id);
+
+    const orders = await Order.find({ userId })
       .sort({ createdAt: -1 });
+
+    console.log("📦 /orders/my — user:", req.user.id, "found:", orders.length, "orders");
+
     res.json(orders);
   } catch (err) {
     console.error("Error fetching user orders:", err);
