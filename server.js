@@ -1,3 +1,4 @@
+require("dotenv").config();
 const mongoose = require("mongoose");
 const express = require("express");
 const cors = require("cors");
@@ -8,8 +9,18 @@ const cookieParser = require("cookie-parser");
 const Order = require("./models/Order");
 const Notice = require("./models/Notice");
 const User = require("./models/User");
+const Medicine = require("./models/Medicine");
+const { sendOrderConfirmationEmail, sendOrderStatusUpdateEmail, sendNewOrderNotificationEmail } = require("./services/emailService");
 
 const app = express();
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/clinicDB", {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log("Connected to MongoDB"))
+.catch((err) => console.error("MongoDB connection error:", err));
 
 // ✅ CORS
 app.use(cors({
@@ -20,6 +31,7 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
+// ✅ JWT Secret
 const JWT_SECRET = "your_jwt_secret_key";
 
 // 🔐 AUTH MIDDLEWARE
@@ -41,12 +53,12 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// ✅ CONNECT DATABASE
+// ✅ CONNECT DATABASE (FIXED)
 mongoose.connect(
   "mongodb+srv://roopeshdeep:32Qwerfdsa@cluster0.00b27mo.mongodb.net/clinicDB"
 )
-  .then(() => console.log("MongoDB connected ✅"))
-  .catch((error) => console.log("MongoDB error ❌", error));
+.then(() => console.log("MongoDB connected ✅"))
+.catch((error) => console.log("MongoDB error ❌", error));
 
 // ✅ TEST ROUTE
 app.get("/", (req, res) => {
@@ -219,7 +231,10 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
   res.json({ message: "Notice deleted" });
 });
 
-// ✅ ORDER ROUTES
+// ✅ START SERVER
+app.listen(5000, () => {
+  console.log("Server running on port 5000 🚀");
+});
 
 // POST /orders — user places a new order
 app.post("/orders", authenticateToken, async (req, res) => {
@@ -261,49 +276,3 @@ app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// GET /orders/my — logged in user gets only their own orders
-app.get("/orders/my", authenticateToken, async (req, res) => {
-  try {
-    const orders = await Order.find({ userId: req.user.id })
-      .sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (err) {
-    console.error("Error fetching user orders:", err);
-    res.status(500).json({ message: "Error fetching your orders" });
-  }
-});
-
-// PATCH /orders/:id/status — admin updates order status
-app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { status } = req.body;
-    const allowed = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled"];
-
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ message: "Invalid status value" });
-    }
-
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true }
-    ).populate("userId", "name email");
-
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    res.json({ message: "Status updated", order });
-  } catch (err) {
-    console.error("Error updating order status:", err);
-    res.status(500).json({ message: "Error updating status" });
-  }
-});
-
-// ✅ PROTECTED TEST
-app.get("/protected", authenticateToken, (req, res) => {
-  res.json({ message: "Protected route working", user: req.user });
-});
-
-// ✅ START SERVER
-app.listen(5000, () => {
-  console.log("Server running on port 5000 🚀");
-});
