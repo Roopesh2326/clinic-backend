@@ -13,7 +13,12 @@ const User = require("./models/User");
 const app = express();
 
 // ✅ CORS
-app.use(cors({ origin: "http://localhost:3000", "https://clinic-frontend-rho.vercel.app", credentials: true }));
+app.use(cors({ 
+  origin: [ "http://localhost:3000", 
+           "https://clinic-frontend-rho.vercel.app" 
+          ], 
+  credentials: true 
+}));
 app.use(express.json());
 app.use(cookieParser());
 
