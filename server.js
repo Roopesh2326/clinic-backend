@@ -9,8 +9,7 @@ const cookieParser = require("cookie-parser");
 const Order = require("./models/Order");
 const Notice = require("./models/Notice");
 const User = require("./models/User");
-const Medicine = require("./models/Medicine");
-const { sendOrderConfirmationEmail, sendOrderStatusUpdateEmail, sendNewOrderNotificationEmail } = require("./services/emailService");
+
 
 const app = express();
 
