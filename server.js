@@ -9,11 +9,12 @@ const cookieParser = require("cookie-parser");
 const Order = require("./models/Order");
 const Notice = require("./models/Notice");
 const User = require("./models/User");
+const Medicine = require("./models/Medicine");
 
 const app = express();
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: "10mb" })); // increased for base64 images
 app.use(cookieParser());
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
@@ -55,7 +56,6 @@ app.post("/register", async (req, res) => {
     const existing = await User.findOne({ email });
     if (existing)
       return res.status(400).json({ message: "Email already registered" });
-
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({
       name, email, phone,
@@ -63,22 +63,13 @@ app.post("/register", async (req, res) => {
       role: role || "user",
     });
     await user.save();
-
-    // ✅ AUTO-LINK: when user registers, link any walk-in orders with same phone
+    // Auto-link walk-in orders by phone
     if (phone) {
-      const linked = await Order.updateMany(
-        {
-          orderType: "walk-in",
-          "guestInfo.phone": String(phone).trim(),
-          userId: null,
-        },
+      await Order.updateMany(
+        { orderType: "walk-in", "guestInfo.phone": String(phone).trim(), userId: null },
         { $set: { userId: user._id } }
       );
-      if (linked.modifiedCount > 0) {
-        console.log("✅ Linked", linked.modifiedCount, "walk-in orders to new user:", email);
-      }
     }
-
     res.json({ message: "User registered successfully" });
   } catch (err) {
     console.error(err);
@@ -93,17 +84,8 @@ app.post("/login", async (req, res) => {
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(401).json({ message: "Invalid credentials" });
-
-    const token = jwt.sign(
-      { id: user._id, role: user.role },
-      JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    res.cookie("token", token, {
-      httpOnly: true, secure: true, sameSite: "None",
-    });
-
+    const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+    res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
     res.json({
       message: "Login successful",
       role: user.role,
@@ -165,7 +147,6 @@ app.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// Search user by phone — admin uses this for walk-in POS
 app.get("/users/search", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { phone, name } = req.query;
@@ -183,8 +164,7 @@ app.get("/users/search", authenticateToken, requireAdmin, async (req, res) => {
 const filePath = "appointments.json";
 let appointments = [];
 if (fs.existsSync(filePath)) {
-  try { appointments = JSON.parse(fs.readFileSync(filePath)); }
-  catch { appointments = []; }
+  try { appointments = JSON.parse(fs.readFileSync(filePath)); } catch { appointments = []; }
 }
 
 app.post("/appointment", (req, res) => {
@@ -215,18 +195,10 @@ app.get("/notice", async (req, res) => {
 app.post("/notice", authenticateToken, requireAdmin, async (req, res) => {
   const { message, expiresInHours } = req.body;
   const parsedHours = Number(expiresInHours || 0);
-  const expiresAt = parsedHours > 0
-    ? new Date(Date.now() + parsedHours * 3600000)
-    : null;
+  const expiresAt = parsedHours > 0 ? new Date(Date.now() + parsedHours * 3600000) : null;
   let notice = await Notice.findOne();
-  if (notice) {
-    notice.message = message;
-    notice.expiresAt = expiresAt;
-    await notice.save();
-  } else {
-    notice = new Notice({ message, expiresAt });
-    await notice.save();
-  }
+  if (notice) { notice.message = message; notice.expiresAt = expiresAt; await notice.save(); }
+  else { notice = new Notice({ message, expiresAt }); await notice.save(); }
   res.json({ message: "Notice updated" });
 });
 
@@ -235,9 +207,144 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
   res.json({ message: "Notice deleted" });
 });
 
+// ─── MEDICINES ───────────────────────────
+
+// GET /medicines — public, used by store page
+app.get("/medicines", async (req, res) => {
+  try {
+    const medicines = await Medicine.find({ isActive: true }).sort({ createdAt: -1 });
+    res.json(medicines);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching medicines" });
+  }
+});
+
+// GET /medicines/all — admin gets all including inactive
+app.get("/medicines/all", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const medicines = await Medicine.find().sort({ createdAt: -1 });
+    res.json(medicines);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching medicines" });
+  }
+});
+
+// GET /medicines/low-stock — admin alert
+app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const medicines = await Medicine.find({
+      isActive: true,
+      $expr: { $lte: ["$stock", "$lowStockThreshold"] }
+    });
+    res.json(medicines);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching low stock medicines" });
+  }
+});
+
+// POST /medicines — admin adds new medicine
+app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, desc, price, category, img, stock, lowStockThreshold, unit } = req.body;
+    if (!name || !price)
+      return res.status(400).json({ message: "Name and price are required" });
+
+    const medicine = new Medicine({
+      name: name.trim(),
+      desc: desc || "",
+      price: Number(price),
+      category: category || "General",
+      img: img || "",
+      stock: Number(stock) || 100,
+      lowStockThreshold: Number(lowStockThreshold) || 10,
+      unit: unit || "units",
+      isActive: true,
+    });
+
+    await medicine.save();
+    console.log("✅ Medicine added:", medicine.name);
+    res.status(201).json({ message: "Medicine added successfully", medicine });
+  } catch (err) {
+    console.error("Error adding medicine:", err);
+    res.status(500).json({ message: "Error adding medicine" });
+  }
+});
+
+// PUT /medicines/:id — admin updates medicine details
+app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, desc, price, category, img, stock, lowStockThreshold, unit, isActive } = req.body;
+
+    const medicine = await Medicine.findByIdAndUpdate(
+      req.params.id,
+      {
+        ...(name && { name: name.trim() }),
+        ...(desc !== undefined && { desc }),
+        ...(price && { price: Number(price) }),
+        ...(category && { category }),
+        ...(img !== undefined && { img }),
+        ...(stock !== undefined && { stock: Number(stock) }),
+        ...(lowStockThreshold !== undefined && { lowStockThreshold: Number(lowStockThreshold) }),
+        ...(unit && { unit }),
+        ...(isActive !== undefined && { isActive }),
+        updatedAt: new Date(),
+      },
+      { new: true }
+    );
+
+    if (!medicine) return res.status(404).json({ message: "Medicine not found" });
+    res.json({ message: "Medicine updated successfully", medicine });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating medicine" });
+  }
+});
+
+// PATCH /medicines/:id/stock — admin updates stock only
+app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { stock, operation } = req.body;
+    // operation: "set" | "add" | "subtract"
+
+    const medicine = await Medicine.findById(req.params.id);
+    if (!medicine) return res.status(404).json({ message: "Medicine not found" });
+
+    if (operation === "add") {
+      medicine.stock = medicine.stock + Number(stock);
+    } else if (operation === "subtract") {
+      medicine.stock = Math.max(0, medicine.stock - Number(stock));
+    } else {
+      // default: set
+      medicine.stock = Number(stock);
+    }
+
+    medicine.updatedAt = new Date();
+    await medicine.save();
+
+    console.log("✅ Stock updated:", medicine.name, "->", medicine.stock);
+    res.json({ message: "Stock updated", medicine });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating stock" });
+  }
+});
+
+// DELETE /medicines/:id — admin deletes medicine (soft delete)
+app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const medicine = await Medicine.findByIdAndUpdate(
+      req.params.id,
+      { isActive: false, updatedAt: new Date() },
+      { new: true }
+    );
+    if (!medicine) return res.status(404).json({ message: "Medicine not found" });
+    res.json({ message: "Medicine removed from store" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting medicine" });
+  }
+});
+
 // ─── ORDERS ──────────────────────────────
 
-// POST /orders — online order by logged in user
+// POST /orders — online order, also reduces stock
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
@@ -254,8 +361,17 @@ app.post("/orders", authenticateToken, async (req, res) => {
     });
 
     await order.save();
+
+    // ✅ Reduce stock for each ordered medicine
+    for (const item of items) {
+      await Medicine.findOneAndUpdate(
+        { name: item.name, isActive: true },
+        { $inc: { stock: -(item.quantity || 1) } }
+      );
+    }
+
     await order.populate("userId", "name email phone");
-    console.log("✅ Online order saved:", order._id, "| User:", req.user.id);
+    console.log("✅ Online order saved:", order._id);
     res.status(201).json({ message: "Order placed successfully", order });
   } catch (err) {
     console.error("❌ Error saving order:", err);
@@ -263,14 +379,12 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-// POST /orders/walk-in — admin creates order for walk-in customer
+// POST /orders/walk-in — admin creates walk-in order, also reduces stock
 app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
-
     if (!items || !items.length || !total)
       return res.status(400).json({ message: "Missing items or total" });
-
     if (!guestName && !existingUserId)
       return res.status(400).json({ message: "Customer name is required" });
 
@@ -278,23 +392,13 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
     let guestInfo = { name: "", phone: "" };
 
     if (existingUserId) {
-      // Linked to existing registered user
       userId = existingUserId;
     } else {
-      // Guest customer — check if registered user with same phone exists
       if (guestPhone) {
-        const existingUser = await User.findOne({
-          phone: String(guestPhone).trim()
-        });
-        if (existingUser) {
-          userId = existingUser._id;
-          console.log("✅ Walk-in matched to registered user:", existingUser.email);
-        }
+        const existingUser = await User.findOne({ phone: String(guestPhone).trim() });
+        if (existingUser) userId = existingUser._id;
       }
-      guestInfo = {
-        name: guestName || "",
-        phone: guestPhone || "",
-      };
+      guestInfo = { name: guestName || "", phone: guestPhone || "" };
     }
 
     const order = new Order({
@@ -304,16 +408,21 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
       items,
       total: Number(total),
       paymentMethod: paymentMethod || "cash",
-      status: "Completed", // walk-in = already paid in person
+      status: "Completed",
     });
 
     await order.save();
 
-    if (userId) {
-      await order.populate("userId", "name email phone");
+    // ✅ Reduce stock for each ordered medicine
+    for (const item of items) {
+      await Medicine.findOneAndUpdate(
+        { name: item.name, isActive: true },
+        { $inc: { stock: -(item.quantity || 1) } }
+      );
     }
 
-    console.log("✅ Walk-in order saved:", order._id, "| Guest:", guestName, guestPhone);
+    if (userId) await order.populate("userId", "name email phone");
+    console.log("✅ Walk-in order saved:", order._id);
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
     console.error("❌ Error saving walk-in order:", err);
@@ -321,7 +430,7 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-// GET /orders — admin gets ALL orders (both online and walk-in)
+// GET /orders — admin gets ALL orders
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find()
@@ -329,13 +438,11 @@ app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
       .sort({ createdAt: -1 });
     res.json(orders);
   } catch (err) {
-    console.error("Error fetching orders:", err);
     res.status(500).json({ message: "Error fetching orders" });
   }
 });
 
-// GET /orders/my — logged in user gets their own orders (online + linked walk-in)
-// ✅ MUST be before /orders/:id
+// GET /orders/my — user gets their own orders
 app.get("/orders/my", authenticateToken, async (req, res) => {
   try {
     const userId = new mongoose.Types.ObjectId(req.user.id);
@@ -343,7 +450,6 @@ app.get("/orders/my", authenticateToken, async (req, res) => {
     console.log("📦 /orders/my — user:", req.user.id, "| found:", orders.length);
     res.json(orders);
   } catch (err) {
-    console.error("Error fetching user orders:", err);
     res.status(500).json({ message: "Error fetching your orders" });
   }
 });
@@ -363,11 +469,9 @@ app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res
     ).populate("userId", "name email phone");
 
     if (!order) return res.status(404).json({ message: "Order not found" });
-
     console.log("✅ Status updated:", req.params.id, "->", status);
     res.json({ message: "Status updated successfully", order });
   } catch (err) {
-    console.error("Error updating status:", err);
     res.status(500).json({ message: "Error updating order status" });
   }
 });
