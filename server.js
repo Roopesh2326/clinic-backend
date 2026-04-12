@@ -12,11 +12,7 @@ const User = require("./models/User");
 
 const app = express();
 
-// ✅ FIXED CORS (important)
-app.use(cors({
-  origin: ["http://localhost:3000", "https://clinic-frontend-rho.vercel.app", "https://clinic-frontend-8s9recgc6-roopesh2326s-projects.vercel.app"],
-  credentials: true
-}));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
@@ -49,7 +45,7 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// ─── TEST ────────────────────────────────
+// ─── TEST ─────────────────────────────────
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
 // ─── REGISTER ────────────────────────────
@@ -59,6 +55,7 @@ app.post("/register", async (req, res) => {
     const existing = await User.findOne({ email });
     if (existing)
       return res.status(400).json({ message: "Email already registered" });
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({
       name, email, phone,
@@ -66,6 +63,22 @@ app.post("/register", async (req, res) => {
       role: role || "user",
     });
     await user.save();
+
+    // ✅ AUTO-LINK: when user registers, link any walk-in orders with same phone
+    if (phone) {
+      const linked = await Order.updateMany(
+        {
+          orderType: "walk-in",
+          "guestInfo.phone": String(phone).trim(),
+          userId: null,
+        },
+        { $set: { userId: user._id } }
+      );
+      if (linked.modifiedCount > 0) {
+        console.log("✅ Linked", linked.modifiedCount, "walk-in orders to new user:", email);
+      }
+    }
+
     res.json({ message: "User registered successfully" });
   } catch (err) {
     console.error(err);
@@ -74,7 +87,6 @@ app.post("/register", async (req, res) => {
 });
 
 // ─── LOGIN ───────────────────────────────
-// ✅ Returns name, email, phone so frontend saves them to localStorage
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -87,11 +99,11 @@ app.post("/login", async (req, res) => {
       JWT_SECRET,
       { expiresIn: "7d" }
     );
+
     res.cookie("token", token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "None",
+      httpOnly: true, secure: true, sameSite: "None",
     });
+
     res.json({
       message: "Login successful",
       role: user.role,
@@ -153,15 +165,26 @@ app.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Search user by phone — admin uses this for walk-in POS
+app.get("/users/search", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { phone, name } = req.query;
+    const query = {};
+    if (phone) query.phone = { $regex: String(phone).trim(), $options: "i" };
+    if (name) query.name = { $regex: String(name).trim(), $options: "i" };
+    const users = await User.find(query).select("-password").limit(10);
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: "Error searching users" });
+  }
+});
+
 // ─── APPOINTMENTS ────────────────────────
 const filePath = "appointments.json";
 let appointments = [];
 if (fs.existsSync(filePath)) {
-  try {
-    appointments = JSON.parse(fs.readFileSync(filePath));
-  } catch {
-    appointments = [];
-  }
+  try { appointments = JSON.parse(fs.readFileSync(filePath)); }
+  catch { appointments = []; }
 }
 
 app.post("/appointment", (req, res) => {
@@ -192,8 +215,9 @@ app.get("/notice", async (req, res) => {
 app.post("/notice", authenticateToken, requireAdmin, async (req, res) => {
   const { message, expiresInHours } = req.body;
   const parsedHours = Number(expiresInHours || 0);
-  const expiresAt =
-    parsedHours > 0 ? new Date(Date.now() + parsedHours * 3600000) : null;
+  const expiresAt = parsedHours > 0
+    ? new Date(Date.now() + parsedHours * 3600000)
+    : null;
   let notice = await Notice.findOne();
   if (notice) {
     notice.message = message;
@@ -213,7 +237,7 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
 
 // ─── ORDERS ──────────────────────────────
 
-// POST /orders — user places a new order
+// POST /orders — online order by logged in user
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
@@ -222,15 +246,16 @@ app.post("/orders", authenticateToken, async (req, res) => {
 
     const order = new Order({
       userId: req.user.id,
+      orderType: "online",
       items,
       total: Number(total),
       paymentMethod: paymentMethod || "cash",
       status: "Pending",
     });
+
     await order.save();
     await order.populate("userId", "name email phone");
-
-    console.log("✅ Order saved:", order._id, "| User:", req.user.id, "| Total:", total);
+    console.log("✅ Online order saved:", order._id, "| User:", req.user.id);
     res.status(201).json({ message: "Order placed successfully", order });
   } catch (err) {
     console.error("❌ Error saving order:", err);
@@ -238,7 +263,65 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-// GET /orders — admin gets ALL orders
+// POST /orders/walk-in — admin creates order for walk-in customer
+app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
+
+    if (!items || !items.length || !total)
+      return res.status(400).json({ message: "Missing items or total" });
+
+    if (!guestName && !existingUserId)
+      return res.status(400).json({ message: "Customer name is required" });
+
+    let userId = null;
+    let guestInfo = { name: "", phone: "" };
+
+    if (existingUserId) {
+      // Linked to existing registered user
+      userId = existingUserId;
+    } else {
+      // Guest customer — check if registered user with same phone exists
+      if (guestPhone) {
+        const existingUser = await User.findOne({
+          phone: String(guestPhone).trim()
+        });
+        if (existingUser) {
+          userId = existingUser._id;
+          console.log("✅ Walk-in matched to registered user:", existingUser.email);
+        }
+      }
+      guestInfo = {
+        name: guestName || "",
+        phone: guestPhone || "",
+      };
+    }
+
+    const order = new Order({
+      userId,
+      guestInfo,
+      orderType: "walk-in",
+      items,
+      total: Number(total),
+      paymentMethod: paymentMethod || "cash",
+      status: "Completed", // walk-in = already paid in person
+    });
+
+    await order.save();
+
+    if (userId) {
+      await order.populate("userId", "name email phone");
+    }
+
+    console.log("✅ Walk-in order saved:", order._id, "| Guest:", guestName, guestPhone);
+    res.status(201).json({ message: "Walk-in order created successfully", order });
+  } catch (err) {
+    console.error("❌ Error saving walk-in order:", err);
+    res.status(500).json({ message: "Error creating walk-in order" });
+  }
+});
+
+// GET /orders — admin gets ALL orders (both online and walk-in)
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find()
@@ -251,11 +334,10 @@ app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// GET /orders/my — logged in user gets ONLY their own orders
-// ✅ MUST be before /orders/:id — otherwise Express treats "my" as an id param
+// GET /orders/my — logged in user gets their own orders (online + linked walk-in)
+// ✅ MUST be before /orders/:id
 app.get("/orders/my", authenticateToken, async (req, res) => {
   try {
-    // ✅ Convert string id from JWT to ObjectId to match MongoDB stored type
     const userId = new mongoose.Types.ObjectId(req.user.id);
     const orders = await Order.find({ userId }).sort({ createdAt: -1 });
     console.log("📦 /orders/my — user:", req.user.id, "| found:", orders.length);
@@ -270,7 +352,7 @@ app.get("/orders/my", authenticateToken, async (req, res) => {
 app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body;
-    const allowed = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled"];
+    const allowed = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled", "Completed"];
     if (!allowed.includes(status))
       return res.status(400).json({ message: "Invalid status value" });
 
@@ -296,9 +378,7 @@ app.get("/protected", authenticateToken, (req, res) => {
 });
 
 // ─── START SERVER ─────────────────────────
-// ✅ Always last — all routes must be defined before this
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT + " 🚀");
 });
-
