@@ -18,12 +18,6 @@ const MedicineSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 });
 
-// Auto-update updatedAt on save
-MedicineSchema.pre("save", function (next) {
-  this.updatedAt = new Date();
-  next();
-});
-
 // Virtual: is this medicine out of stock?
 MedicineSchema.virtual("isOutOfStock").get(function () {
   return this.stock <= 0;
