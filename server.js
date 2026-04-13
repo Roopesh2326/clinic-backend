@@ -473,6 +473,112 @@ app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res
     res.status(500).json({ message: "Error updating order status" });
   }
 });
+// ─── ANALYTICS ───────────────────────────────────────────────────────────────
+
+app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+
+    // ── Date boundaries ──────────────────────────────────────────────────────
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekStart  = new Date(todayStart); weekStart.setDate(weekStart.getDate() - 6);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // ── Fetch only what we need ──────────────────────────────────────────────
+    const allOrders = await Order.find({
+      status: { $nin: ["Cancelled"] },
+    }).select("items total status createdAt orderType").lean();
+
+    // ── Helper: filter by date range ─────────────────────────────────────────
+    const inRange = (order, from) => new Date(order.createdAt) >= from;
+
+    const todayOrders  = allOrders.filter((o) => inRange(o, todayStart));
+    const weekOrders   = allOrders.filter((o) => inRange(o, weekStart));
+    const monthOrders  = allOrders.filter((o) => inRange(o, monthStart));
+
+    // ── Revenue totals ───────────────────────────────────────────────────────
+    const sumRevenue = (orders) =>
+      orders.reduce((s, o) => s + Number(o.total || 0), 0);
+
+    // ── Top selling medicines (from all-time orders) ──────────────────────────
+    const medicineMap = {};
+    for (const order of allOrders) {
+      for (const item of order.items || []) {
+        const name = item.name || "Unknown";
+        if (!medicineMap[name]) medicineMap[name] = { name, totalQty: 0, totalRevenue: 0 };
+        medicineMap[name].totalQty     += Number(item.quantity || 1);
+        medicineMap[name].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
+      }
+    }
+    const topMedicines = Object.values(medicineMap)
+      .sort((a, b) => b.totalQty - a.totalQty)
+      .slice(0, 8);
+
+    // ── Today's top medicines ─────────────────────────────────────────────────
+    const todayMedMap = {};
+    for (const order of todayOrders) {
+      for (const item of order.items || []) {
+        const name = item.name || "Unknown";
+        if (!todayMedMap[name]) todayMedMap[name] = { name, totalQty: 0, totalRevenue: 0 };
+        todayMedMap[name].totalQty     += Number(item.quantity || 1);
+        todayMedMap[name].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
+      }
+    }
+    const todayTopMedicines = Object.values(todayMedMap)
+      .sort((a, b) => b.totalQty - a.totalQty)
+      .slice(0, 5);
+
+    // ── Daily revenue for last 7 days (for chart) ────────────────────────────
+    const dailyMap = {};
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(todayStart);
+      d.setDate(d.getDate() - i);
+      const key = d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+      dailyMap[key] = { date: key, revenue: 0, orders: 0 };
+    }
+    for (const order of weekOrders) {
+      const key = new Date(order.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+      if (dailyMap[key]) {
+        dailyMap[key].revenue += Number(order.total || 0);
+        dailyMap[key].orders  += 1;
+      }
+    }
+    const dailyChart = Object.values(dailyMap);
+
+    // ── Order type split (online vs walk-in) today ───────────────────────────
+    const todayOnline = todayOrders.filter((o) => o.orderType === "online").length;
+    const todayWalkin = todayOrders.filter((o) => o.orderType === "walk-in").length;
+
+    res.json({
+      today: {
+        revenue:    sumRevenue(todayOrders),
+        orders:     todayOrders.length,
+        onlineOrders: todayOnline,
+        walkinOrders: todayWalkin,
+        topMedicines: todayTopMedicines,
+      },
+      week: {
+        revenue: sumRevenue(weekOrders),
+        orders:  weekOrders.length,
+      },
+      month: {
+        revenue: sumRevenue(monthOrders),
+        orders:  monthOrders.length,
+      },
+      allTime: {
+        revenue: sumRevenue(allOrders),
+        orders:  allOrders.length,
+      },
+      topMedicines,   // all-time top 8
+      dailyChart,     // last 7 days
+    });
+
+  } catch (err) {
+    console.error("[Analytics] Error:", err);
+    res.status(500).json({ message: "Error fetching analytics" });
+  }
+});
+
 
 // ─── PROTECTED TEST ───────────────────────
 app.get("/protected", authenticateToken, (req, res) => {
