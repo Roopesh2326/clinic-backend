@@ -14,7 +14,7 @@ const Medicine = require("./models/Medicine");
 const app = express();
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "10mb" })); // increased for base64 images
+app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
@@ -57,11 +57,7 @@ app.post("/register", async (req, res) => {
     if (existing)
       return res.status(400).json({ message: "Email already registered" });
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({
-      name, email, phone,
-      password: hashedPassword,
-      role: role || "user",
-    });
+    const user = new User({ name, email, phone, password: hashedPassword, role: role || "user" });
     await user.save();
     // Auto-link walk-in orders by phone
     if (phone) {
@@ -92,6 +88,7 @@ app.post("/login", async (req, res) => {
       name: user.name,
       email: user.email,
       phone: user.phone,
+      userId: user._id, // ✅ send userId so frontend can save it
     });
   } catch (err) {
     console.error(err);
@@ -167,14 +164,77 @@ if (fs.existsSync(filePath)) {
   try { appointments = JSON.parse(fs.readFileSync(filePath)); } catch { appointments = []; }
 }
 
+// POST /appointment — book appointment (works for both logged in and guest)
 app.post("/appointment", (req, res) => {
-  appointments.push(req.body);
-  fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
-  res.json({ message: "Appointment saved successfully" });
+  try {
+    const appointmentData = {
+      ...req.body,
+      id: Date.now().toString(),
+      bookedAt: req.body.bookedAt || new Date().toISOString(),
+      status: "Pending",
+    };
+    appointments.push(appointmentData);
+    fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
+    res.json({ message: "Appointment booked successfully!" });
+  } catch (err) {
+    console.error("Error saving appointment:", err);
+    res.status(500).json({ message: "Error saving appointment" });
+  }
 });
 
+// GET /appointments — admin gets ALL appointments
 app.get("/appointments", authenticateToken, requireAdmin, (req, res) => {
   res.json(appointments);
+});
+
+// GET /appointments/my — logged in user gets their own appointments
+// Matches by userId OR by contact phone number
+app.get("/appointments/my", authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // First find user's phone for matching
+    User.findById(userId).select("phone").then((user) => {
+      const userPhone = user?.phone ? String(user.phone).trim() : null;
+
+      const myAppointments = appointments.filter((apt) => {
+        // Match by userId if it was saved
+        if (apt.userId && String(apt.userId) === String(userId)) return true;
+        // Match by phone number as fallback
+        if (userPhone && apt.contact && String(apt.contact).trim() === userPhone) return true;
+        return false;
+      });
+
+      // Sort by date descending
+      myAppointments.sort((a, b) => new Date(b.bookedAt || 0) - new Date(a.bookedAt || 0));
+
+      res.json(myAppointments);
+    }).catch(() => res.json([]));
+
+  } catch (err) {
+    console.error("Error fetching appointments:", err);
+    res.status(500).json({ message: "Error fetching appointments" });
+  }
+});
+
+// PATCH /appointments/:id/status — admin updates appointment status
+app.patch("/appointments/:id/status", authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const allowed = ["Pending", "Confirmed", "Completed", "Cancelled"];
+    if (!allowed.includes(status))
+      return res.status(400).json({ message: "Invalid status" });
+
+    const idx = appointments.findIndex((apt) => String(apt.id) === String(id));
+    if (idx === -1) return res.status(404).json({ message: "Appointment not found" });
+
+    appointments[idx].status = status;
+    fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
+    res.json({ message: "Status updated", appointment: appointments[idx] });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating appointment status" });
+  }
 });
 
 // ─── NOTICES ─────────────────────────────
@@ -209,7 +269,6 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
 
 // ─── MEDICINES ───────────────────────────
 
-// GET /medicines — public, used by store page
 app.get("/medicines", async (req, res) => {
   try {
     const medicines = await Medicine.find({ isActive: true }).sort({ createdAt: -1 });
@@ -219,7 +278,6 @@ app.get("/medicines", async (req, res) => {
   }
 });
 
-// GET /medicines/all — admin gets all including inactive
 app.get("/medicines/all", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicines = await Medicine.find().sort({ createdAt: -1 });
@@ -229,7 +287,6 @@ app.get("/medicines/all", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// GET /medicines/low-stock — admin alert
 app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicines = await Medicine.find({
@@ -242,39 +299,28 @@ app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res
   }
 });
 
-// POST /medicines — admin adds new medicine
 app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, desc, price, category, img, stock, lowStockThreshold, unit } = req.body;
     if (!name || !price)
       return res.status(400).json({ message: "Name and price are required" });
-
     const medicine = new Medicine({
-      name: name.trim(),
-      desc: desc || "",
-      price: Number(price),
-      category: category || "General",
-      img: img || "",
+      name: name.trim(), desc: desc || "", price: Number(price),
+      category: category || "General", img: img || "",
       stock: Number(stock) || 100,
       lowStockThreshold: Number(lowStockThreshold) || 10,
-      unit: unit || "units",
-      isActive: true,
+      unit: unit || "units", isActive: true,
     });
-
     await medicine.save();
-    console.log("✅ Medicine added:", medicine.name);
     res.status(201).json({ message: "Medicine added successfully", medicine });
   } catch (err) {
-    console.error("Error adding medicine:", err);
     res.status(500).json({ message: "Error adding medicine" });
   }
 });
 
-// PUT /medicines/:id — admin updates medicine details
 app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, desc, price, category, img, stock, lowStockThreshold, unit, isActive } = req.body;
-
     const medicine = await Medicine.findByIdAndUpdate(
       req.params.id,
       {
@@ -291,7 +337,6 @@ app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
       },
       { new: true }
     );
-
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
     res.json({ message: "Medicine updated successfully", medicine });
   } catch (err) {
@@ -299,41 +344,26 @@ app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// PATCH /medicines/:id/stock — admin updates stock only
 app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { stock, operation } = req.body;
-    // operation: "set" | "add" | "subtract"
-
     const medicine = await Medicine.findById(req.params.id);
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
-
-    if (operation === "add") {
-      medicine.stock = medicine.stock + Number(stock);
-    } else if (operation === "subtract") {
-      medicine.stock = Math.max(0, medicine.stock - Number(stock));
-    } else {
-      // default: set
-      medicine.stock = Number(stock);
-    }
-
+    if (operation === "add") medicine.stock = medicine.stock + Number(stock);
+    else if (operation === "subtract") medicine.stock = Math.max(0, medicine.stock - Number(stock));
+    else medicine.stock = Number(stock);
     medicine.updatedAt = new Date();
     await medicine.save();
-
-    console.log("✅ Stock updated:", medicine.name, "->", medicine.stock);
     res.json({ message: "Stock updated", medicine });
   } catch (err) {
     res.status(500).json({ message: "Error updating stock" });
   }
 });
 
-// DELETE /medicines/:id — admin deletes medicine (soft delete)
 app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicine = await Medicine.findByIdAndUpdate(
-      req.params.id,
-      { isActive: false, updatedAt: new Date() },
-      { new: true }
+      req.params.id, { isActive: false, updatedAt: new Date() }, { new: true }
     );
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
     res.json({ message: "Medicine removed from store" });
@@ -344,34 +374,24 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
 
 // ─── ORDERS ──────────────────────────────
 
-// POST /orders — online order, also reduces stock
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
     if (!items || !items.length || !total)
       return res.status(400).json({ message: "Missing items or total" });
-
     const order = new Order({
-      userId: req.user.id,
-      orderType: "online",
-      items,
-      total: Number(total),
-      paymentMethod: paymentMethod || "cash",
-      status: "Pending",
+      userId: req.user.id, orderType: "online",
+      items, total: Number(total),
+      paymentMethod: paymentMethod || "cash", status: "Pending",
     });
-
     await order.save();
-
-    // ✅ Reduce stock for each ordered medicine
     for (const item of items) {
       await Medicine.findOneAndUpdate(
         { name: item.name, isActive: true },
         { $inc: { stock: -(item.quantity || 1) } }
       );
     }
-
     await order.populate("userId", "name email phone");
-    console.log("✅ Online order saved:", order._id);
     res.status(201).json({ message: "Order placed successfully", order });
   } catch (err) {
     console.error("❌ Error saving order:", err);
@@ -379,7 +399,6 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-// POST /orders/walk-in — admin creates walk-in order, also reduces stock
 app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
@@ -387,10 +406,8 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
       return res.status(400).json({ message: "Missing items or total" });
     if (!guestName && !existingUserId)
       return res.status(400).json({ message: "Customer name is required" });
-
     let userId = null;
     let guestInfo = { name: "", phone: "" };
-
     if (existingUserId) {
       userId = existingUserId;
     } else {
@@ -400,29 +417,19 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
       }
       guestInfo = { name: guestName || "", phone: guestPhone || "" };
     }
-
     const order = new Order({
-      userId,
-      guestInfo,
-      orderType: "walk-in",
-      items,
-      total: Number(total),
-      paymentMethod: paymentMethod || "cash",
-      status: "Completed",
+      userId, guestInfo, orderType: "walk-in",
+      items, total: Number(total),
+      paymentMethod: paymentMethod || "cash", status: "Completed",
     });
-
     await order.save();
-
-    // ✅ Reduce stock for each ordered medicine
     for (const item of items) {
       await Medicine.findOneAndUpdate(
         { name: item.name, isActive: true },
         { $inc: { stock: -(item.quantity || 1) } }
       );
     }
-
     if (userId) await order.populate("userId", "name email phone");
-    console.log("✅ Walk-in order saved:", order._id);
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
     console.error("❌ Error saving walk-in order:", err);
@@ -430,7 +437,6 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-// GET /orders — admin gets ALL orders
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find()
@@ -442,34 +448,26 @@ app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// GET /orders/my — user gets their own orders
 app.get("/orders/my", authenticateToken, async (req, res) => {
   try {
     const userId = new mongoose.Types.ObjectId(req.user.id);
     const orders = await Order.find({ userId }).sort({ createdAt: -1 });
-    console.log("📦 /orders/my — user:", req.user.id, "| found:", orders.length);
     res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "Error fetching your orders" });
   }
 });
 
-// PATCH /orders/:id/status — admin updates order status
 app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body;
     const allowed = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled", "Completed"];
     if (!allowed.includes(status))
       return res.status(400).json({ message: "Invalid status value" });
-
     const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true }
+      req.params.id, { status }, { new: true }
     ).populate("userId", "name email phone");
-
     if (!order) return res.status(404).json({ message: "Order not found" });
-    console.log("✅ Status updated:", req.params.id, "->", status);
     res.json({ message: "Status updated successfully", order });
   } catch (err) {
     res.status(500).json({ message: "Error updating order status" });
