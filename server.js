@@ -19,7 +19,6 @@ app.use(cookieParser());
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
-// ✅ SINGLE DB CONNECTION
 mongoose
   .connect(
     process.env.MONGODB_URI ||
@@ -28,7 +27,6 @@ mongoose
   .then(() => console.log("MongoDB connected ✅"))
   .catch((err) => console.error("MongoDB error ❌", err));
 
-// 🔐 AUTH MIDDLEWARE
 const authenticateToken = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ message: "Access denied" });
@@ -46,7 +44,6 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// ─── TEST ─────────────────────────────────
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
 // ─── REGISTER ────────────────────────────
@@ -54,12 +51,10 @@ app.post("/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
   try {
     const existing = await User.findOne({ email });
-    if (existing)
-      return res.status(400).json({ message: "Email already registered" });
+    if (existing) return res.status(400).json({ message: "Email already registered" });
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ name, email, phone, password: hashedPassword, role: role || "user" });
     await user.save();
-    // Auto-link walk-in orders by phone
     if (phone) {
       await Order.updateMany(
         { orderType: "walk-in", "guestInfo.phone": String(phone).trim(), userId: null },
@@ -88,7 +83,7 @@ app.post("/login", async (req, res) => {
       name: user.name,
       email: user.email,
       phone: user.phone,
-      userId: user._id, // ✅ send userId so frontend can save it
+      userId: user._id,
     });
   } catch (err) {
     console.error(err);
@@ -96,13 +91,11 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ─── LOGOUT ──────────────────────────────
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
   res.json({ message: "Logged out" });
 });
 
-// ─── PROFILE ─────────────────────────────
 app.get("/profile", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
@@ -113,7 +106,6 @@ app.get("/profile", authenticateToken, async (req, res) => {
   }
 });
 
-// ─── FORGOT PASSWORD ─────────────────────
 app.post("/forgot-password", async (req, res) => {
   const { email, phone, newPassword } = req.body;
   if (!email || !phone || !newPassword)
@@ -164,7 +156,6 @@ if (fs.existsSync(filePath)) {
   try { appointments = JSON.parse(fs.readFileSync(filePath)); } catch { appointments = []; }
 }
 
-// POST /appointment — book appointment (works for both logged in and guest)
 app.post("/appointment", (req, res) => {
   try {
     const appointmentData = {
@@ -182,42 +173,32 @@ app.post("/appointment", (req, res) => {
   }
 });
 
-// GET /appointments — admin gets ALL appointments
 app.get("/appointments", authenticateToken, requireAdmin, (req, res) => {
-  res.json(appointments);
+  // Sort by bookedAt descending
+  const sorted = [...appointments].sort((a, b) =>
+    new Date(b.bookedAt || 0) - new Date(a.bookedAt || 0)
+  );
+  res.json(sorted);
 });
 
-// GET /appointments/my — logged in user gets their own appointments
-// Matches by userId OR by contact phone number
 app.get("/appointments/my", authenticateToken, (req, res) => {
   try {
     const userId = req.user.id;
-
-    // First find user's phone for matching
     User.findById(userId).select("phone").then((user) => {
       const userPhone = user?.phone ? String(user.phone).trim() : null;
-
       const myAppointments = appointments.filter((apt) => {
-        // Match by userId if it was saved
         if (apt.userId && String(apt.userId) === String(userId)) return true;
-        // Match by phone number as fallback
         if (userPhone && apt.contact && String(apt.contact).trim() === userPhone) return true;
         return false;
       });
-
-      // Sort by date descending
       myAppointments.sort((a, b) => new Date(b.bookedAt || 0) - new Date(a.bookedAt || 0));
-
       res.json(myAppointments);
     }).catch(() => res.json([]));
-
   } catch (err) {
-    console.error("Error fetching appointments:", err);
     res.status(500).json({ message: "Error fetching appointments" });
   }
 });
 
-// PATCH /appointments/:id/status — admin updates appointment status
 app.patch("/appointments/:id/status", authenticateToken, requireAdmin, (req, res) => {
   try {
     const { id } = req.params;
@@ -225,10 +206,8 @@ app.patch("/appointments/:id/status", authenticateToken, requireAdmin, (req, res
     const allowed = ["Pending", "Confirmed", "Completed", "Cancelled"];
     if (!allowed.includes(status))
       return res.status(400).json({ message: "Invalid status" });
-
     const idx = appointments.findIndex((apt) => String(apt.id) === String(id));
     if (idx === -1) return res.status(404).json({ message: "Appointment not found" });
-
     appointments[idx].status = status;
     fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
     res.json({ message: "Status updated", appointment: appointments[idx] });
@@ -268,7 +247,6 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // ─── MEDICINES ───────────────────────────
-
 app.get("/medicines", async (req, res) => {
   try {
     const medicines = await Medicine.find({ isActive: true }).sort({ createdAt: -1 });
@@ -302,13 +280,11 @@ app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res
 app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, desc, price, category, img, stock, lowStockThreshold, unit } = req.body;
-    if (!name || !price)
-      return res.status(400).json({ message: "Name and price are required" });
+    if (!name || !price) return res.status(400).json({ message: "Name and price are required" });
     const medicine = new Medicine({
       name: name.trim(), desc: desc || "", price: Number(price),
       category: category || "General", img: img || "",
-      stock: Number(stock) || 100,
-      lowStockThreshold: Number(lowStockThreshold) || 10,
+      stock: Number(stock) || 100, lowStockThreshold: Number(lowStockThreshold) || 10,
       unit: unit || "units", isActive: true,
     });
     await medicine.save();
@@ -373,7 +349,6 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
 });
 
 // ─── ORDERS ──────────────────────────────
-
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
@@ -473,112 +448,98 @@ app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res
     res.status(500).json({ message: "Error updating order status" });
   }
 });
-// ─── ANALYTICS ───────────────────────────────────────────────────────────────
 
+// ─── ANALYTICS ───────────────────────────
 app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const now = new Date();
 
-    // ── Date boundaries ──────────────────────────────────────────────────────
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const weekStart  = new Date(todayStart); weekStart.setDate(weekStart.getDate() - 6);
+    // ── Date boundaries ──
+    const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
+    const todayEnd   = new Date(now); todayEnd.setHours(23,59,59,999);
+
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
+
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // ── Fetch only what we need ──────────────────────────────────────────────
+    // ── Fetch all non-cancelled orders ──
     const allOrders = await Order.find({
-      status: { $nin: ["Cancelled"] },
-    }).select("items total status createdAt orderType").lean();
+      status: { $nin: ["Cancelled"] }
+    }).sort({ createdAt: 1 });
 
-    // ── Helper: filter by date range ─────────────────────────────────────────
-    const inRange = (order, from) => new Date(order.createdAt) >= from;
+    // ── Helper: revenue + count for a date range ──
+    const statsFor = (orders, from, to) => {
+      const filtered = orders.filter(o => {
+        const d = new Date(o.createdAt);
+        return d >= from && d <= to;
+      });
+      return {
+        orders: filtered.length,
+        revenue: filtered.reduce((s, o) => s + Number(o.total || 0), 0),
+        onlineOrders: filtered.filter(o => o.orderType !== "walk-in").length,
+        walkinOrders: filtered.filter(o => o.orderType === "walk-in").length,
+      };
+    };
 
-    const todayOrders  = allOrders.filter((o) => inRange(o, todayStart));
-    const weekOrders   = allOrders.filter((o) => inRange(o, weekStart));
-    const monthOrders  = allOrders.filter((o) => inRange(o, monthStart));
-
-    // ── Revenue totals ───────────────────────────────────────────────────────
-    const sumRevenue = (orders) =>
-      orders.reduce((s, o) => s + Number(o.total || 0), 0);
-
-    // ── Top selling medicines (from all-time orders) ──────────────────────────
-    const medicineMap = {};
-    for (const order of allOrders) {
-      for (const item of order.items || []) {
-        const name = item.name || "Unknown";
-        if (!medicineMap[name]) medicineMap[name] = { name, totalQty: 0, totalRevenue: 0 };
-        medicineMap[name].totalQty     += Number(item.quantity || 1);
-        medicineMap[name].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
+    // ── Top medicines helper ──
+    const topMedsFrom = (orders, limit = 5) => {
+      const map = {};
+      for (const order of orders) {
+        for (const item of (order.items || [])) {
+          const key = item.name || "Unknown";
+          if (!map[key]) map[key] = { name: key, totalQty: 0, totalRevenue: 0 };
+          map[key].totalQty += Number(item.quantity || 1);
+          map[key].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
+        }
       }
-    }
-    const topMedicines = Object.values(medicineMap)
-      .sort((a, b) => b.totalQty - a.totalQty)
-      .slice(0, 8);
+      return Object.values(map)
+        .sort((a, b) => b.totalQty - a.totalQty)
+        .slice(0, limit);
+    };
 
-    // ── Today's top medicines ─────────────────────────────────────────────────
-    const todayMedMap = {};
-    for (const order of todayOrders) {
-      for (const item of order.items || []) {
-        const name = item.name || "Unknown";
-        if (!todayMedMap[name]) todayMedMap[name] = { name, totalQty: 0, totalRevenue: 0 };
-        todayMedMap[name].totalQty     += Number(item.quantity || 1);
-        todayMedMap[name].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
-      }
-    }
-    const todayTopMedicines = Object.values(todayMedMap)
-      .sort((a, b) => b.totalQty - a.totalQty)
-      .slice(0, 5);
-
-    // ── Daily revenue for last 7 days (for chart) ────────────────────────────
-    const dailyMap = {};
+    // ── Daily chart: last 7 days ──
+    const dailyChart = [];
     for (let i = 6; i >= 0; i--) {
-      const d = new Date(todayStart);
-      d.setDate(d.getDate() - i);
-      const key = d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
-      dailyMap[key] = { date: key, revenue: 0, orders: 0 };
+      const day = new Date(now);
+      day.setDate(now.getDate() - i);
+      const from = new Date(day); from.setHours(0,0,0,0);
+      const to   = new Date(day); to.setHours(23,59,59,999);
+      const s = statsFor(allOrders, from, to);
+      dailyChart.push({
+        date: day.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
+        revenue: s.revenue,
+        orders: s.orders,
+      });
     }
-    for (const order of weekOrders) {
-      const key = new Date(order.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
-      if (dailyMap[key]) {
-        dailyMap[key].revenue += Number(order.total || 0);
-        dailyMap[key].orders  += 1;
-      }
-    }
-    const dailyChart = Object.values(dailyMap);
 
-    // ── Order type split (online vs walk-in) today ───────────────────────────
-    const todayOnline = todayOrders.filter((o) => o.orderType === "online").length;
-    const todayWalkin = todayOrders.filter((o) => o.orderType === "walk-in").length;
+    const todayStats = statsFor(allOrders, todayStart, todayEnd);
+    const weekStats  = statsFor(allOrders, weekStart, todayEnd);
+    const monthStats = statsFor(allOrders, monthStart, todayEnd);
+    const allTimeStats = {
+      orders: allOrders.length,
+      revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0),
+    };
 
     res.json({
       today: {
-        revenue:    sumRevenue(todayOrders),
-        orders:     todayOrders.length,
-        onlineOrders: todayOnline,
-        walkinOrders: todayWalkin,
-        topMedicines: todayTopMedicines,
+        ...todayStats,
+        topMedicines: topMedsFrom(
+          allOrders.filter(o => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd)
+        ),
       },
-      week: {
-        revenue: sumRevenue(weekOrders),
-        orders:  weekOrders.length,
-      },
-      month: {
-        revenue: sumRevenue(monthOrders),
-        orders:  monthOrders.length,
-      },
-      allTime: {
-        revenue: sumRevenue(allOrders),
-        orders:  allOrders.length,
-      },
-      topMedicines,   // all-time top 8
-      dailyChart,     // last 7 days
+      week:    { ...weekStats },
+      month:   { ...monthStats },
+      allTime: allTimeStats,
+      dailyChart,
+      topMedicines: topMedsFrom(allOrders, 10),
     });
 
   } catch (err) {
-    console.error("[Analytics] Error:", err);
-    res.status(500).json({ message: "Error fetching analytics" });
+    console.error("Analytics error:", err);
+    res.status(500).json({ message: "Error computing analytics" });
   }
 });
-
 
 // ─── PROTECTED TEST ───────────────────────
 app.get("/protected", authenticateToken, (req, res) => {
