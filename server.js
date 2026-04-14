@@ -88,7 +88,7 @@ app.post("/login", async (req, res) => {
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(401).json({ message: "Invalid credentials" });
-    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
+    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
     res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
     res.json({
       message: "Login successful",
@@ -365,11 +365,9 @@ app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
 
-    if (!items || !items.length || !total) {
+    if (!items || !items.length || !total)
       return res.status(400).json({ message: "Missing items or total" });
-    }
 
-    // ✅ Create order
     const order = new Order({
       userId: req.user.id,
       orderType: "online",
@@ -381,7 +379,6 @@ app.post("/orders", authenticateToken, async (req, res) => {
 
     await order.save();
 
-    // ✅ Update stock
     for (const item of items) {
       await Medicine.findOneAndUpdate(
         { name: item.name, isActive: true },
@@ -391,32 +388,90 @@ app.post("/orders", authenticateToken, async (req, res) => {
 
     await order.populate("userId", "name email phone");
 
-    // ✅ SEND RESPONSE FIRST (IMPORTANT)
+    // ✅ Send response FIRST — email is non-blocking
     res.status(201).json({ message: "Order placed successfully", order });
 
-    // ✅ SEND EMAIL (NON-BLOCKING)
+    // ✅ Email block — fully isolated, never affects order
     try {
+      const orderId = order._id.toString().slice(-6).toUpperCase();
+      const itemRows = items.map(item => `
+        <tr>
+          <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;">${item.name}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;text-align:center;">${item.quantity || 1}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;text-align:right;">Rs.${(item.price * (item.quantity || 1)).toFixed(2)}</td>
+        </tr>
+      `).join("");
+
+      // ── User confirmation email ──
       await transporter.sendMail({
-        from: process.env.EMAIL_USER, // ✅ FIXED
+        from: `"Digital Clinic" <${process.env.EMAIL_USER}>`,
         to: req.user.email,
-        subject: "Order Confirmation",
-
+        subject: `Order Confirmed — #${orderId}`,
         html: `
-          <h2>Order Confirmed ✅</h2>
-          <p><strong>Total:</strong> Rs.${total}</p>
-
-          <h3>Items:</h3>
-          <ul>
-            ${items.map(item => `
-              <li>${item.name} x ${item.quantity}</li>
-            `).join("")}
-          </ul>
-
-          <p>Thank you for choosing our clinic.</p>
+          <div style="font-family:sans-serif;max-width:540px;margin:0 auto;color:#1a1a1a;">
+            <div style="background:#166534;padding:24px 32px;border-radius:12px 12px 0 0;">
+              <h1 style="margin:0;color:white;font-size:22px;">Digital Clinic</h1>
+              <p style="margin:4px 0 0;color:rgba(255,255,255,0.8);font-size:14px;">Order Confirmation</p>
+            </div>
+            <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:28px 32px;">
+              <h2 style="margin:0 0 6px;color:#166534;font-size:18px;">Your order is confirmed! ✅</h2>
+              <p style="color:#888;font-size:14px;margin:0 0 20px;">Thank you for choosing Digital Clinic.</p>
+              <p style="margin:0 0 6px;font-size:14px;"><strong>Order ID:</strong> #${orderId}</p>
+              <p style="margin:0 0 6px;font-size:14px;"><strong>Status:</strong> Pending</p>
+              <p style="margin:0 0 20px;font-size:14px;"><strong>Payment:</strong> ${paymentMethod || "Cash"}</p>
+              <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:16px;">
+                <thead>
+                  <tr style="background:#f9fafb;">
+                    <th style="padding:10px 12px;text-align:left;border-bottom:1px solid #e5e7eb;">Medicine</th>
+                    <th style="padding:10px 12px;text-align:center;border-bottom:1px solid #e5e7eb;">Qty</th>
+                    <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e5e7eb;">Subtotal</th>
+                  </tr>
+                </thead>
+                <tbody>${itemRows}</tbody>
+              </table>
+              <div style="text-align:right;font-size:16px;font-weight:700;color:#166534;margin-bottom:24px;">
+                Total: Rs.${Number(total).toFixed(2)}
+              </div>
+              <p style="font-size:12px;color:#aaa;margin:0;">Track your order in the Digital Clinic app.</p>
+            </div>
+          </div>
         `,
       });
+
+      // ── Admin notification email ──
+      if (process.env.ADMIN_EMAIL) {
+        await transporter.sendMail({
+          from: `"Digital Clinic System" <${process.env.EMAIL_USER}>`,
+          to: process.env.ADMIN_EMAIL,
+          subject: `New Order — #${orderId}`,
+          html: `
+            <div style="font-family:sans-serif;max-width:540px;color:#1a1a1a;">
+              <h2 style="color:#dc2626;">New Online Order Received</h2>
+              <p><strong>Order ID:</strong> #${orderId}</p>
+              <p><strong>Customer:</strong> ${req.user.email}</p>
+              <p><strong>Payment:</strong> ${paymentMethod || "cash"}</p>
+              <table style="width:100%;border-collapse:collapse;font-size:14px;margin:12px 0;">
+                <thead>
+                  <tr style="background:#f9fafb;">
+                    <th style="padding:8px 12px;text-align:left;border-bottom:1px solid #e5e7eb;">Medicine</th>
+                    <th style="padding:8px 12px;text-align:center;border-bottom:1px solid #e5e7eb;">Qty</th>
+                    <th style="padding:8px 12px;text-align:right;border-bottom:1px solid #e5e7eb;">Subtotal</th>
+                  </tr>
+                </thead>
+                <tbody>${itemRows}</tbody>
+              </table>
+              <div style="text-align:right;font-size:16px;font-weight:700;color:#dc2626;">
+                Total: Rs.${Number(total).toFixed(2)}
+              </div>
+            </div>
+          `,
+        });
+      }
+
+      console.log(`[Email] ✅ Sent for order #${orderId}`);
     } catch (emailErr) {
-      console.error("❌ Email failed:", emailErr);
+      // Isolated — order already confirmed, email failure is silent
+      console.error("[Email] ❌ Failed:", emailErr.message);
     }
 
   } catch (err) {
@@ -424,7 +479,6 @@ app.post("/orders", authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Error saving order. Please try again." });
   }
 });
-
 app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
