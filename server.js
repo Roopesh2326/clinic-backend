@@ -47,12 +47,16 @@ const requireAdmin = (req, res, next) => {
 
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
+require("dns").setDefaultResultOrder("ipv4first");
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false, //important
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  tls: { rejectUnauthorized: false },
 });
 
 // ─── REGISTER ────────────────────────────
