@@ -1,5 +1,6 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
+const nodemailer = require("nodemailer");
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -46,6 +47,14 @@ const requireAdmin = (req, res, next) => {
 
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
 // ─── REGISTER ────────────────────────────
 app.post("/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
@@ -75,7 +84,7 @@ app.post("/login", async (req, res) => {
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(401).json({ message: "Invalid credentials" });
-    const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
     res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
     res.json({
       message: "Login successful",
@@ -348,26 +357,64 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
   }
 });
 
-// ─── ORDERS ──────────────────────────────
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
-    if (!items || !items.length || !total)
+
+    if (!items || !items.length || !total) {
       return res.status(400).json({ message: "Missing items or total" });
+    }
+
+    // ✅ Create order
     const order = new Order({
-      userId: req.user.id, orderType: "online",
-      items, total: Number(total),
-      paymentMethod: paymentMethod || "cash", status: "Pending",
+      userId: req.user.id,
+      orderType: "online",
+      items,
+      total: Number(total),
+      paymentMethod: paymentMethod || "cash",
+      status: "Pending",
     });
+
     await order.save();
+
+    // ✅ Update stock
     for (const item of items) {
       await Medicine.findOneAndUpdate(
         { name: item.name, isActive: true },
         { $inc: { stock: -(item.quantity || 1) } }
       );
     }
+
     await order.populate("userId", "name email phone");
+
+    // ✅ SEND RESPONSE FIRST (IMPORTANT)
     res.status(201).json({ message: "Order placed successfully", order });
+
+    // ✅ SEND EMAIL (NON-BLOCKING)
+    try {
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER, // ✅ FIXED
+        to: req.user.email,
+        subject: "Order Confirmation",
+
+        html: `
+          <h2>Order Confirmed ✅</h2>
+          <p><strong>Total:</strong> Rs.${total}</p>
+
+          <h3>Items:</h3>
+          <ul>
+            ${items.map(item => `
+              <li>${item.name} x ${item.quantity}</li>
+            `).join("")}
+          </ul>
+
+          <p>Thank you for choosing our clinic.</p>
+        `,
+      });
+    } catch (emailErr) {
+      console.error("❌ Email failed:", emailErr);
+    }
+
   } catch (err) {
     console.error("❌ Error saving order:", err);
     res.status(500).json({ message: "Error saving order. Please try again." });
