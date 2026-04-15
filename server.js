@@ -51,12 +51,6 @@ require("dns").setDefaultResultOrder("ipv4first");
 
 const resend = new Resend('re_SijaPRn1_LbsKGyRV8AX2dunFG9N8duBr');
 
-resend.emails.send({
-  from: 'onboarding@resend.dev',
-  to: req.user.id,
-  subject: 'Order Confirmed',
-  html: "<h2>Order placed</h2>",
-});
 
 // ─── REGISTER ────────────────────────────
 app.post("/register", async (req, res) => {
@@ -362,6 +356,13 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
 
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
+    resend.emails.send({
+    from: 'onboarding@resend.dev',
+    to: req.user.id,
+    subject: 'Order Confirmed',
+    html: "<h2>Order placed</h2>",
+  });
+
     const { items, total, paymentMethod } = req.body;
 
     if (!items || !items.length || !total) {
