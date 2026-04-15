@@ -415,7 +415,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
         // ── USER EMAIL ──
         await resend.emails.send({
           from: "Digital Clinic <onboarding@resend.dev>",
-          to: req.user.email,
+          to: order.userId.email,
           subject: `Order Confirmed — #${orderId}`,
           html: `
             <h2>Your order is confirmed ✅</h2>
