@@ -47,10 +47,98 @@ const requireAdmin = (req, res, next) => {
 
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
-require("dns").setDefaultResultOrder("ipv4first");
+// ── Resend client ─────────────────────────────────────────────────────────────
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-const resend = new Resend('re_SijaPRn1_LbsKGyRV8AX2dunFG9N8duBr');
+// ── Email helper — never throws, fully isolated ───────────────────────────────
+const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod }) => {
+  try {
+    const orderId   = order._id.toString().slice(-6).toUpperCase();
+    const itemRows  = items.map((item) => `
+      <tr>
+        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;">${item.name}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;text-align:center;">${item.quantity || 1}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;text-align:right;">Rs.${((item.price || 0) * (item.quantity || 1)).toFixed(2)}</td>
+      </tr>
+    `).join("");
 
+    const userHtml = `
+      <div style="font-family:sans-serif;max-width:540px;margin:0 auto;color:#1a1a1a;">
+        <div style="background:#166534;padding:24px 32px;border-radius:12px 12px 0 0;">
+          <h1 style="margin:0;color:white;font-size:22px;">Digital Clinic</h1>
+          <p style="margin:4px 0 0;color:rgba(255,255,255,0.8);font-size:14px;">Order Confirmation</p>
+        </div>
+        <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:28px 32px;">
+          <h2 style="margin:0 0 6px;color:#166534;">Your order is confirmed ✅</h2>
+          <p style="color:#888;font-size:14px;margin:0 0 20px;">Thank you for choosing Digital Clinic.</p>
+          <p style="font-size:14px;margin:0 0 6px;"><strong>Order ID:</strong> #${orderId}</p>
+          <p style="font-size:14px;margin:0 0 6px;"><strong>Status:</strong> Pending</p>
+          <p style="font-size:14px;margin:0 0 20px;"><strong>Payment:</strong> ${paymentMethod || "Cash"}</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:16px;">
+            <thead>
+              <tr style="background:#f9fafb;">
+                <th style="padding:10px 12px;text-align:left;border-bottom:1px solid #e5e7eb;">Medicine</th>
+                <th style="padding:10px 12px;text-align:center;border-bottom:1px solid #e5e7eb;">Qty</th>
+                <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e5e7eb;">Subtotal</th>
+              </tr>
+            </thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+          <div style="text-align:right;font-size:16px;font-weight:700;color:#166534;margin-bottom:24px;">
+            Total: Rs.${Number(total).toFixed(2)}
+          </div>
+          <p style="font-size:12px;color:#aaa;margin:0;">Track your order in the Digital Clinic app.</p>
+        </div>
+      </div>
+    `;
+
+    const adminHtml = `
+      <div style="font-family:sans-serif;max-width:540px;color:#1a1a1a;">
+        <h2 style="color:#dc2626;">New Online Order Received</h2>
+        <p><strong>Order ID:</strong> #${orderId}</p>
+        <p><strong>Customer email:</strong> ${userEmail}</p>
+        <p><strong>Payment:</strong> ${paymentMethod || "cash"}</p>
+        <table style="width:100%;border-collapse:collapse;font-size:14px;margin:12px 0;">
+          <thead>
+            <tr style="background:#f9fafb;">
+              <th style="padding:8px 12px;text-align:left;border-bottom:1px solid #e5e7eb;">Medicine</th>
+              <th style="padding:8px 12px;text-align:center;border-bottom:1px solid #e5e7eb;">Qty</th>
+              <th style="padding:8px 12px;text-align:right;border-bottom:1px solid #e5e7eb;">Subtotal</th>
+            </tr>
+          </thead>
+          <tbody>${itemRows}</tbody>
+        </table>
+        <div style="text-align:right;font-size:16px;font-weight:700;color:#dc2626;">
+          Total: Rs.${Number(total).toFixed(2)}
+        </div>
+      </div>
+    `;
+
+    // ── Send user email ──
+    await resend.emails.send({
+      from: "Digital Clinic <onboarding@resend.dev>",
+      to: userEmail,
+      subject: `Order Confirmed — #${orderId}`,
+      html: userHtml,
+    });
+    console.log(`[Email] ✅ User email sent to ${userEmail}`);
+
+    // ── Send admin email ──
+    if (process.env.ADMIN_EMAIL) {
+      await resend.emails.send({
+        from: "Digital Clinic <onboarding@resend.dev>",
+        to: process.env.ADMIN_EMAIL,
+        subject: `New Order — #${orderId}`,
+        html: adminHtml,
+      });
+      console.log(`[Email] ✅ Admin email sent`);
+    }
+
+  } catch (emailErr) {
+    // NEVER rethrow — email failure must never affect order
+    console.error("[Email] ❌ Failed:", emailErr.message);
+  }
+};
 
 // ─── REGISTER ────────────────────────────
 app.post("/register", async (req, res) => {
@@ -81,7 +169,13 @@ app.post("/login", async (req, res) => {
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(401).json({ message: "Invalid credentials" });
-    const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
+
+    // ✅ email included in JWT so req.user.email works in all routes
+    const token = jwt.sign(
+      { id: user._id, role: user.role, email: user.email },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
     res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
     res.json({
       message: "Login successful",
@@ -147,7 +241,7 @@ app.get("/users/search", authenticateToken, requireAdmin, async (req, res) => {
     const { phone, name } = req.query;
     const query = {};
     if (phone) query.phone = { $regex: String(phone).trim(), $options: "i" };
-    if (name) query.name = { $regex: String(name).trim(), $options: "i" };
+    if (name)  query.name  = { $regex: String(name).trim(),  $options: "i" };
     const users = await User.find(query).select("-password").limit(10);
     res.json(users);
   } catch (err) {
@@ -180,7 +274,6 @@ app.post("/appointment", (req, res) => {
 });
 
 app.get("/appointments", authenticateToken, requireAdmin, (req, res) => {
-  // Sort by bookedAt descending
   const sorted = [...appointments].sort((a, b) =>
     new Date(b.bookedAt || 0) - new Date(a.bookedAt || 0)
   );
@@ -331,9 +424,9 @@ app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, r
     const { stock, operation } = req.body;
     const medicine = await Medicine.findById(req.params.id);
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
-    if (operation === "add") medicine.stock = medicine.stock + Number(stock);
+    if (operation === "add")           medicine.stock = medicine.stock + Number(stock);
     else if (operation === "subtract") medicine.stock = Math.max(0, medicine.stock - Number(stock));
-    else medicine.stock = Number(stock);
+    else                               medicine.stock = Number(stock);
     medicine.updatedAt = new Date();
     await medicine.save();
     res.json({ message: "Stock updated", medicine });
@@ -354,21 +447,16 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
   }
 });
 
+// ─── ORDERS ──────────────────────────────
+
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
-    resend.emails.send({
-    from: 'onboarding@resend.dev',
-    to: req.userId.email,
-    subject: 'Order Confirmed',
-    html: "<h2>Order placed</h2>",
-  });
-
     const { items, total, paymentMethod } = req.body;
 
-    if (!items || !items.length || !total) {
+    if (!items || !items.length || !total)
       return res.status(400).json({ message: "Missing items or total" });
-    }
 
+    // ✅ STEP 1: Save order
     const order = new Order({
       userId: req.user.id,
       orderType: "online",
@@ -377,10 +465,9 @@ app.post("/orders", authenticateToken, async (req, res) => {
       paymentMethod: paymentMethod || "cash",
       status: "Pending",
     });
-
     await order.save();
 
-    // Update stock
+    // ✅ STEP 2: Decrement stock
     for (const item of items) {
       await Medicine.findOneAndUpdate(
         { name: item.name, isActive: true },
@@ -390,76 +477,25 @@ app.post("/orders", authenticateToken, async (req, res) => {
 
     await order.populate("userId", "name email phone");
 
-    // ✅ Send response FIRST (never block user)
-    res.status(201).json({
-      message: "Order placed successfully",
+    // ✅ STEP 3: Send response IMMEDIATELY — email never blocks this
+    res.status(201).json({ message: "Order placed successfully", order });
+
+    // ✅ STEP 4: Send emails fire-and-forget AFTER response
+    // req.user.email comes from JWT payload (set at login)
+    sendOrderEmails({
       order,
+      userEmail: req.user.email,  // ✅ FIXED: was req.userId.email
+      items,
+      total,
+      paymentMethod,
     });
-
-    // ✅ EMAIL BLOCK (fully isolated)
-    (async () => {
-      try {
-        console.log("📩 Email process started");
-
-        const orderId = order._id.toString().slice(-6).toUpperCase();
-
-        const itemRows = items.map(item => `
-          <tr>
-            <td>${item.name}</td>
-            <td style="text-align:center;">${item.quantity || 1}</td>
-            <td style="text-align:right;">
-              Rs.${((item.price || 0) * (item.quantity || 1)).toFixed(2)}
-            </td>
-          </tr>
-        `).join("");
-
-        // ── USER EMAIL ──
-        await resend.emails.send({
-          from: "Digital Clinic <onboarding@resend.dev>",
-          to: order.userId.email,
-          subject: `Order Confirmed — #${orderId}`,
-          html: `
-            <h2>Your order is confirmed ✅</h2>
-            <p><strong>Order ID:</strong> #${orderId}</p>
-            <p><strong>Total:</strong> Rs.${Number(total).toFixed(2)}</p>
-            <table border="1" cellspacing="0" cellpadding="6">
-              ${itemRows}
-            </table>
-          `,
-        });
-
-        console.log("✅ User email sent");
-
-        // ── ADMIN EMAIL ──
-        if (process.env.ADMIN_EMAIL) {
-          await resend.emails.send({
-            from: "Digital Clinic <onboarding@resend.dev>",
-            to: process.env.ADMIN_EMAIL,
-            subject: `New Order — #${orderId}`,
-            html: `
-              <h2>New Order Received</h2>
-              <p><strong>Order ID:</strong> #${orderId}</p>
-              <p><strong>User:</strong> ${req.user.email}</p>
-              <p><strong>Total:</strong> Rs.${Number(total).toFixed(2)}</p>
-              <table border="1" cellspacing="0" cellpadding="6">
-                ${itemRows}
-              </table>
-            `,
-          });
-
-          console.log("✅ Admin email sent");
-        }
-
-      } catch (emailErr) {
-        console.error("❌ Email failed:", emailErr.message);
-      }
-    })();
 
   } catch (err) {
     console.error("❌ Error saving order:", err);
-    res.status(500).json({ message: "Error saving order" });
+    res.status(500).json({ message: "Error saving order. Please try again." });
   }
 });
+
 app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
@@ -467,8 +503,10 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
       return res.status(400).json({ message: "Missing items or total" });
     if (!guestName && !existingUserId)
       return res.status(400).json({ message: "Customer name is required" });
-    let userId = null;
+
+    let userId   = null;
     let guestInfo = { name: "", phone: "" };
+
     if (existingUserId) {
       userId = existingUserId;
     } else {
@@ -478,18 +516,21 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
       }
       guestInfo = { name: guestName || "", phone: guestPhone || "" };
     }
+
     const order = new Order({
       userId, guestInfo, orderType: "walk-in",
       items, total: Number(total),
       paymentMethod: paymentMethod || "cash", status: "Completed",
     });
     await order.save();
+
     for (const item of items) {
       await Medicine.findOneAndUpdate(
         { name: item.name, isActive: true },
         { $inc: { stock: -(item.quantity || 1) } }
       );
     }
+
     if (userId) await order.populate("userId", "name email phone");
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
@@ -540,70 +581,57 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
   try {
     const now = new Date();
 
-    // ── Date boundaries ──
     const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
     const todayEnd   = new Date(now); todayEnd.setHours(23,59,59,999);
-
-    const weekStart = new Date(now);
-    weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
-
+    const weekStart  = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // ── Fetch all non-cancelled orders ──
-    const allOrders = await Order.find({
-      status: { $nin: ["Cancelled"] }
-    }).sort({ createdAt: 1 });
+    const allOrders = await Order.find({ status: { $nin: ["Cancelled"] } }).sort({ createdAt: 1 });
 
-    // ── Helper: revenue + count for a date range ──
     const statsFor = (orders, from, to) => {
-      const filtered = orders.filter(o => {
+      const filtered = orders.filter((o) => {
         const d = new Date(o.createdAt);
         return d >= from && d <= to;
       });
       return {
-        orders: filtered.length,
-        revenue: filtered.reduce((s, o) => s + Number(o.total || 0), 0),
-        onlineOrders: filtered.filter(o => o.orderType !== "walk-in").length,
-        walkinOrders: filtered.filter(o => o.orderType === "walk-in").length,
+        orders:       filtered.length,
+        revenue:      filtered.reduce((s, o) => s + Number(o.total || 0), 0),
+        onlineOrders: filtered.filter((o) => o.orderType !== "walk-in").length,
+        walkinOrders: filtered.filter((o) => o.orderType === "walk-in").length,
       };
     };
 
-    // ── Top medicines helper ──
     const topMedsFrom = (orders, limit = 5) => {
       const map = {};
       for (const order of orders) {
         for (const item of (order.items || [])) {
           const key = item.name || "Unknown";
           if (!map[key]) map[key] = { name: key, totalQty: 0, totalRevenue: 0 };
-          map[key].totalQty += Number(item.quantity || 1);
+          map[key].totalQty     += Number(item.quantity || 1);
           map[key].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
         }
       }
-      return Object.values(map)
-        .sort((a, b) => b.totalQty - a.totalQty)
-        .slice(0, limit);
+      return Object.values(map).sort((a, b) => b.totalQty - a.totalQty).slice(0, limit);
     };
 
-    // ── Daily chart: last 7 days ──
     const dailyChart = [];
     for (let i = 6; i >= 0; i--) {
-      const day = new Date(now);
-      day.setDate(now.getDate() - i);
+      const day  = new Date(now); day.setDate(now.getDate() - i);
       const from = new Date(day); from.setHours(0,0,0,0);
       const to   = new Date(day); to.setHours(23,59,59,999);
-      const s = statsFor(allOrders, from, to);
+      const s    = statsFor(allOrders, from, to);
       dailyChart.push({
         date: day.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
         revenue: s.revenue,
-        orders: s.orders,
+        orders:  s.orders,
       });
     }
 
-    const todayStats = statsFor(allOrders, todayStart, todayEnd);
-    const weekStats  = statsFor(allOrders, weekStart, todayEnd);
-    const monthStats = statsFor(allOrders, monthStart, todayEnd);
+    const todayStats   = statsFor(allOrders, todayStart, todayEnd);
+    const weekStats    = statsFor(allOrders, weekStart, todayEnd);
+    const monthStats   = statsFor(allOrders, monthStart, todayEnd);
     const allTimeStats = {
-      orders: allOrders.length,
+      orders:  allOrders.length,
       revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0),
     };
 
@@ -611,12 +639,12 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
       today: {
         ...todayStats,
         topMedicines: topMedsFrom(
-          allOrders.filter(o => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd)
+          allOrders.filter((o) => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd)
         ),
       },
-      week:    { ...weekStats },
-      month:   { ...monthStats },
-      allTime: allTimeStats,
+      week:         { ...weekStats },
+      month:        { ...monthStats },
+      allTime:      allTimeStats,
       dailyChart,
       topMedicines: topMedsFrom(allOrders, 10),
     });
