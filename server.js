@@ -53,7 +53,7 @@ const resend = new Resend('re_SijaPRn1_LbsKGyRV8AX2dunFG9N8duBr');
 
 resend.emails.send({
   from: 'onboarding@resend.dev',
-  to: req.user.email,
+  to: req.user.id,
   subject: 'Order Confirmed',
   html: "<h2>Order placed</h2>",
 });
