@@ -1,8 +1,8 @@
-const { Resend } = require('resend');
 require("dotenv").config();
 const mongoose = require("mongoose");
 const express = require("express");
 const cors = require("cors");
+const { Resend } = require("resend");
 const fs = require("fs");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
