@@ -358,7 +358,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
   try {
     resend.emails.send({
     from: 'onboarding@resend.dev',
-    to: req.user.id,
+    to: req.userId.emails,
     subject: 'Order Confirmed',
     html: "<h2>Order placed</h2>",
   });
