@@ -48,7 +48,6 @@ const requireAdmin = (req, res, next) => {
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
 require("dns").setDefaultResultOrder("ipv4first");
-import { Resend } from 'resend';
 
 const resend = new Resend('re_SijaPRn1_LbsKGyRV8AX2dunFG9N8duBr');
 
