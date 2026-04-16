@@ -7,13 +7,49 @@ const fs = require("fs");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
-const Order = require("./models/Order");
-const Notice = require("./models/Notice");
-const User = require("./models/User");
-const Medicine = require("./models/Medicine");
-const Counter = require("./models/Counter"); // ✅ TOKEN: import Counter model
+const http = require("http");
+const { Server } = require("socket.io");
 
-const app = express();
+const Order      = require("./models/Order");
+const Notice     = require("./models/Notice");
+const User       = require("./models/User");
+const Medicine   = require("./models/Medicine");
+const Counter    = require("./models/Counter");
+const QueueState = require("./models/QueueState");
+
+const app    = express();
+const server = http.createServer(app);
+
+// ─── SOCKET.IO ────────────────────────────────────────────────────────────────
+const io = new Server(server, {
+  cors: { origin: true, credentials: true },
+});
+
+io.on("connection", (socket) => {
+  console.log(`[Socket] Client connected: ${socket.id}`);
+  socket.on("disconnect", () => {
+    console.log(`[Socket] Client disconnected: ${socket.id}`);
+  });
+});
+
+// Helper: broadcast queue update to ALL connected clients
+const broadcastQueue = async (type) => {
+  try {
+    const state = await QueueState.findOne({ type });
+    if (!state) return;
+    const key     = `${type}:${getTodayIST()}`;
+    const counter = await Counter.findOne({ key });
+    const total   = counter ? counter.seq : 0;
+    io.emit("queue:update", {
+      type,
+      currentServing: state.currentServing,
+      totalIssued:    total,
+      lastUpdated:    state.lastUpdated,
+    });
+  } catch (err) {
+    console.error("[Socket] broadcastQueue error:", err.message);
+  }
+};
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
@@ -47,17 +83,14 @@ const requireAdmin = (req, res, next) => {
 
 app.get("/", (req, res) => res.send("Backend working ✅"));
 
-// ─── NODEMAILER TRANSPORTER ───────────────────────────────────────────────────
+// ─── NODEMAILER ───────────────────────────────────────────────────────────────
 require("dns").setDefaultResultOrder("ipv4first");
 
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 587,
   secure: false,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
   tls: { rejectUnauthorized: false },
 });
 
@@ -70,7 +103,6 @@ transporter.verify((err) => {
 const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, tokenStr }) => {
   try {
     const orderId  = order._id.toString().slice(-6).toUpperCase();
-
     const itemRows = items.map((item) => `
       <tr>
         <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;">${item.name}</td>
@@ -81,13 +113,11 @@ const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, 
       </tr>
     `).join("");
 
-    // ✅ TOKEN: include token row in email if available
     const tokenRow = tokenStr ? `
       <tr>
         <td style="padding:6px 0;color:#555;">Queue Token</td>
         <td style="padding:6px 0;font-weight:700;color:#166534;font-size:18px;">${tokenStr}</td>
-      </tr>
-    ` : "";
+      </tr>` : "";
 
     const userHtml = `
       <div style="font-family:sans-serif;max-width:540px;margin:0 auto;color:#1a1a1a;">
@@ -98,46 +128,32 @@ const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, 
         <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:28px 32px;">
           <h2 style="margin:0 0 8px;color:#166534;font-size:20px;">Your order is confirmed! ✅</h2>
           <p style="color:#888;font-size:14px;margin:0 0 24px;">Thank you for choosing Digital Clinic.</p>
-
           <table style="width:100%;font-size:14px;border-collapse:collapse;margin-bottom:20px;">
-            <tr>
-              <td style="padding:6px 0;color:#555;width:140px;">Order ID</td>
-              <td style="padding:6px 0;font-weight:700;color:#166534;">#${orderId}</td>
-            </tr>
+            <tr><td style="padding:6px 0;color:#555;width:140px;">Order ID</td>
+                <td style="padding:6px 0;font-weight:700;color:#166534;">#${orderId}</td></tr>
             ${tokenRow}
-            <tr>
-              <td style="padding:6px 0;color:#555;">Status</td>
-              <td style="padding:6px 0;font-weight:600;">Pending</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 0;color:#555;">Payment</td>
-              <td style="padding:6px 0;text-transform:capitalize;">${paymentMethod || "Cash"}</td>
-            </tr>
+            <tr><td style="padding:6px 0;color:#555;">Status</td>
+                <td style="padding:6px 0;font-weight:600;">Pending</td></tr>
+            <tr><td style="padding:6px 0;color:#555;">Payment</td>
+                <td style="padding:6px 0;text-transform:capitalize;">${paymentMethod || "Cash"}</td></tr>
           </table>
-
           <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:20px;">
-            <thead>
-              <tr style="background:#f9fafb;">
-                <th style="padding:10px 12px;text-align:left;border-bottom:1px solid #e5e7eb;font-weight:600;">Medicine</th>
-                <th style="padding:10px 12px;text-align:center;border-bottom:1px solid #e5e7eb;font-weight:600;">Qty</th>
-                <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e5e7eb;font-weight:600;">Subtotal</th>
-              </tr>
-            </thead>
+            <thead><tr style="background:#f9fafb;">
+              <th style="padding:10px 12px;text-align:left;border-bottom:1px solid #e5e7eb;">Medicine</th>
+              <th style="padding:10px 12px;text-align:center;border-bottom:1px solid #e5e7eb;">Qty</th>
+              <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e5e7eb;">Subtotal</th>
+            </tr></thead>
             <tbody>${itemRows}</tbody>
           </table>
-
-          <div style="text-align:right;font-size:17px;font-weight:700;color:#166534;
-                      padding:12px 0;border-top:2px solid #e5e7eb;margin-bottom:24px;">
+          <div style="text-align:right;font-size:17px;font-weight:700;color:#166534;padding:12px 0;border-top:2px solid #e5e7eb;margin-bottom:24px;">
             Total: Rs.${Number(total).toFixed(2)}
           </div>
-
           <p style="font-size:12px;color:#aaa;margin:0;line-height:1.6;">
-            You can track your order status anytime in the Digital Clinic app.<br/>
-            If you have any questions, contact us at ${process.env.EMAIL_USER}.
+            Track your order in the Digital Clinic app.<br/>
+            Contact: ${process.env.EMAIL_USER}
           </p>
         </div>
-      </div>
-    `;
+      </div>`;
 
     const adminHtml = `
       <div style="font-family:sans-serif;max-width:540px;color:#1a1a1a;">
@@ -146,39 +162,28 @@ const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, 
         </div>
         <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:24px 28px;">
           <table style="width:100%;font-size:14px;border-collapse:collapse;margin-bottom:20px;">
-            <tr>
-              <td style="padding:6px 0;color:#555;width:140px;">Order ID</td>
-              <td style="padding:6px 0;font-weight:700;color:#dc2626;">#${orderId}</td>
-            </tr>
-            ${tokenStr ? `<tr><td style="padding:6px 0;color:#555;">Token</td><td style="padding:6px 0;font-weight:700;">${tokenStr}</td></tr>` : ""}
-            <tr>
-              <td style="padding:6px 0;color:#555;">Customer</td>
-              <td style="padding:6px 0;">${userEmail}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 0;color:#555;">Payment</td>
-              <td style="padding:6px 0;text-transform:capitalize;">${paymentMethod || "cash"}</td>
-            </tr>
+            <tr><td style="padding:6px 0;color:#555;width:140px;">Order ID</td>
+                <td style="padding:6px 0;font-weight:700;color:#dc2626;">#${orderId}</td></tr>
+            ${tokenStr ? `<tr><td style="padding:6px 0;color:#555;">Token</td>
+                <td style="padding:6px 0;font-weight:700;">${tokenStr}</td></tr>` : ""}
+            <tr><td style="padding:6px 0;color:#555;">Customer</td>
+                <td style="padding:6px 0;">${userEmail}</td></tr>
+            <tr><td style="padding:6px 0;color:#555;">Payment</td>
+                <td style="padding:6px 0;text-transform:capitalize;">${paymentMethod || "cash"}</td></tr>
           </table>
-
           <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:20px;">
-            <thead>
-              <tr style="background:#f9fafb;">
-                <th style="padding:8px 12px;text-align:left;border-bottom:1px solid #e5e7eb;font-weight:600;">Medicine</th>
-                <th style="padding:8px 12px;text-align:center;border-bottom:1px solid #e5e7eb;font-weight:600;">Qty</th>
-                <th style="padding:8px 12px;text-align:right;border-bottom:1px solid #e5e7eb;font-weight:600;">Subtotal</th>
-              </tr>
-            </thead>
+            <thead><tr style="background:#f9fafb;">
+              <th style="padding:8px 12px;text-align:left;border-bottom:1px solid #e5e7eb;">Medicine</th>
+              <th style="padding:8px 12px;text-align:center;border-bottom:1px solid #e5e7eb;">Qty</th>
+              <th style="padding:8px 12px;text-align:right;border-bottom:1px solid #e5e7eb;">Subtotal</th>
+            </tr></thead>
             <tbody>${itemRows}</tbody>
           </table>
-
-          <div style="text-align:right;font-size:17px;font-weight:700;color:#dc2626;
-                      padding:12px 0;border-top:2px solid #e5e7eb;">
+          <div style="text-align:right;font-size:17px;font-weight:700;color:#dc2626;padding:12px 0;border-top:2px solid #e5e7eb;">
             Total: Rs.${Number(total).toFixed(2)}
           </div>
         </div>
-      </div>
-    `;
+      </div>`;
 
     const emailPromises = [
       transporter.sendMail({
@@ -188,7 +193,6 @@ const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, 
         html: userHtml,
       }),
     ];
-
     if (process.env.ADMIN_EMAIL) {
       emailPromises.push(
         transporter.sendMail({
@@ -199,64 +203,145 @@ const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, 
         })
       );
     }
-
     await Promise.all(emailPromises);
     console.log(`[Email] ✅ Sent for order #${orderId} → ${userEmail}`);
-
   } catch (err) {
     console.error("[Email] ❌ Failed:", err.message);
   }
 };
 
-// ─── TOKEN SYSTEM ─────────────────────────────────────────────────────────────
-// Returns today's date as YYYY-MM-DD in IST so tokens reset at midnight India time
+// ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
 const getTodayIST = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 
-/**
- * getNextToken(type)
- *
- * Atomically increments a MongoDB counter and returns the next token.
- * Uses findOneAndUpdate with $inc — single atomic operation, race-condition safe.
- * Even 100 concurrent requests each get a unique sequential number.
- *
- * type: "order" → ORD-001  |  "walkin" → WLK-001  |  "appointment" → APT-001
- * Key includes today's date so counters auto-reset daily.
- */
 const getNextToken = async (type = "order") => {
   const date = getTodayIST();
   const key  = `${type}:${date}`;
-
   const counter = await Counter.findOneAndUpdate(
     { key },
-    {
-      $inc: { seq: 1 },
-      $setOnInsert: { date, createdAt: new Date() },
-    },
+    { $inc: { seq: 1 }, $setOnInsert: { date, createdAt: new Date() } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-
   const num      = counter.seq;
   const prefix   = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
   const tokenStr = `${prefix}-${String(num).padStart(3, "0")}`;
-
   return { token: num, tokenStr, date };
 };
 
-// Helper for analytics — how many tokens issued today for a type
 const getTodayTokenCount = async (type) => {
   const key     = `${type}:${getTodayIST()}`;
   const counter = await Counter.findOne({ key });
   return counter ? counter.seq : 0;
 };
 
+// ─── QUEUE ROUTES ─────────────────────────────────────────────────────────────
+
+// GET /queue/status?type=appointment|order|walkin
+// Returns current serving number, total issued today, patients ahead for a token
+app.get("/queue/status", async (req, res) => {
+  try {
+    const type = req.query.type || "appointment";
+    if (!["appointment", "order", "walkin"].includes(type))
+      return res.status(400).json({ message: "Invalid type" });
+
+    // Ensure QueueState exists for this type
+    let state = await QueueState.findOne({ type });
+    if (!state) {
+      state = await QueueState.create({ type, currentServing: 0 });
+    }
+
+    const totalIssued = await getTodayTokenCount(type);
+
+    res.json({
+      type,
+      currentServing: state.currentServing,
+      totalIssued,
+      nextToken:  totalIssued + 1,
+      lastUpdated: state.lastUpdated,
+    });
+  } catch (err) {
+    console.error("[Queue] GET /queue/status error:", err);
+    res.status(500).json({ message: "Error fetching queue status" });
+  }
+});
+
+// POST /queue/next — admin calls this to serve next patient
+// Body: { type: "appointment" | "order" | "walkin" }
+app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const type = req.body.type || "appointment";
+    if (!["appointment", "order", "walkin"].includes(type))
+      return res.status(400).json({ message: "Invalid type" });
+
+    const totalIssued = await getTodayTokenCount(type);
+
+    // Atomically increment — concurrency safe with findOneAndUpdate
+    const state = await QueueState.findOneAndUpdate(
+      { type },
+      {
+        $inc: { currentServing: 1 },
+        $set: { lastUpdated: new Date() },
+      },
+      { upsert: true, new: true }
+    );
+
+    // Cap at totalIssued — don't go past the last token
+    if (state.currentServing > totalIssued && totalIssued > 0) {
+      await QueueState.updateOne({ type }, { $set: { currentServing: totalIssued } });
+      state.currentServing = totalIssued;
+    }
+
+    console.log(`[Queue] ✅ Now serving ${type} #${state.currentServing}`);
+
+    // Broadcast to all connected clients via Socket.io
+    io.emit("queue:update", {
+      type,
+      currentServing: state.currentServing,
+      totalIssued,
+      lastUpdated:    state.lastUpdated,
+    });
+
+    res.json({
+      message:        `Now serving ${type} #${state.currentServing}`,
+      type,
+      currentServing: state.currentServing,
+      totalIssued,
+      lastUpdated:    state.lastUpdated,
+    });
+  } catch (err) {
+    console.error("[Queue] POST /queue/next error:", err);
+    res.status(500).json({ message: "Error advancing queue" });
+  }
+});
+
+// POST /queue/reset — admin resets queue for a type (start of day)
+app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const type = req.body.type || "appointment";
+    if (!["appointment", "order", "walkin"].includes(type))
+      return res.status(400).json({ message: "Invalid type" });
+
+    await QueueState.findOneAndUpdate(
+      { type },
+      { $set: { currentServing: 0, lastUpdated: new Date() } },
+      { upsert: true, new: true }
+    );
+
+    io.emit("queue:update", { type, currentServing: 0, totalIssued: 0, lastUpdated: new Date() });
+
+    console.log(`[Queue] 🔄 Reset ${type} queue`);
+    res.json({ message: `${type} queue reset to 0` });
+  } catch (err) {
+    res.status(500).json({ message: "Error resetting queue" });
+  }
+});
+
 // ─── REGISTER ────────────────────────────────────────────────────────────────
 app.post("/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
   try {
     const existing = await User.findOne({ email });
-    if (existing)
-      return res.status(400).json({ message: "Email already registered" });
+    if (existing) return res.status(400).json({ message: "Email already registered" });
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ name, email, phone, password: hashedPassword, role: role || "user" });
     await user.save();
@@ -288,10 +373,8 @@ app.post("/login", async (req, res) => {
     res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
     res.json({
       message: "Login successful",
-      role: user.role,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
+      role: user.role, name: user.name,
+      email: user.email, phone: user.phone,
       userId: user._id,
     });
   } catch (err) {
@@ -300,13 +383,11 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ─── LOGOUT ───────────────────────────────────────────────────────────────────
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
   res.json({ message: "Logged out" });
 });
 
-// ─── PROFILE ──────────────────────────────────────────────────────────────────
 app.get("/profile", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
@@ -317,7 +398,6 @@ app.get("/profile", authenticateToken, async (req, res) => {
   }
 });
 
-// ─── FORGOT PASSWORD ──────────────────────────────────────────────────────────
 app.post("/forgot-password", async (req, res) => {
   const { email, phone, newPassword } = req.body;
   if (!email || !phone || !newPassword)
@@ -369,33 +449,22 @@ if (fs.existsSync(filePath)) {
   catch { appointments = []; }
 }
 
-// ✅ TOKEN: appointment booking now gets an atomic APT-xxx token
 app.post("/appointment", async (req, res) => {
   try {
-    // Get atomic token BEFORE saving so it's included in the record
     const { token, tokenStr, date } = await getNextToken("appointment");
-
     const appointmentData = {
       ...req.body,
       id:          Date.now().toString(),
       bookedAt:    req.body.bookedAt || new Date().toISOString(),
       status:      "Pending",
-      tokenNumber: token,      // 1, 2, 3 ...
-      tokenStr,                // APT-001, APT-002 ...
-      tokenDate:   date,       // "2024-04-15"
-    };
-
-    appointments.push(appointmentData);
-    fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
-
-    console.log(`📋 Appointment booked | Token: ${tokenStr} | Patient: ${req.body.name}`);
-
-    res.json({
-      message:     "Appointment booked successfully!",
       tokenNumber: token,
       tokenStr,
       tokenDate:   date,
-    });
+    };
+    appointments.push(appointmentData);
+    fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
+    console.log(`📋 Appointment booked | Token: ${tokenStr} | Patient: ${req.body.name}`);
+    res.json({ message: "Appointment booked successfully!", tokenNumber: token, tokenStr, tokenDate: date });
   } catch (err) {
     console.error("Error saving appointment:", err);
     res.status(500).json({ message: "Error saving appointment" });
@@ -419,9 +488,7 @@ app.get("/appointments/my", authenticateToken, (req, res) => {
         if (userPhone && apt.contact && String(apt.contact).trim() === userPhone) return true;
         return false;
       });
-      myAppointments.sort(
-        (a, b) => new Date(b.bookedAt || 0) - new Date(a.bookedAt || 0)
-      );
+      myAppointments.sort((a, b) => new Date(b.bookedAt || 0) - new Date(a.bookedAt || 0));
       res.json(myAppointments);
     }).catch(() => res.json([]));
   } catch (err) {
@@ -437,8 +504,7 @@ app.patch("/appointments/:id/status", authenticateToken, requireAdmin, (req, res
     if (!allowed.includes(status))
       return res.status(400).json({ message: "Invalid status" });
     const idx = appointments.findIndex((apt) => String(apt.id) === String(id));
-    if (idx === -1)
-      return res.status(404).json({ message: "Appointment not found" });
+    if (idx === -1) return res.status(404).json({ message: "Appointment not found" });
     appointments[idx].status = status;
     fs.writeFileSync(filePath, JSON.stringify(appointments, null, 2));
     res.json({ message: "Status updated", appointment: appointments[idx] });
@@ -447,7 +513,6 @@ app.patch("/appointments/:id/status", authenticateToken, requireAdmin, (req, res
   }
 });
 
-// ✅ TOKEN: today's appointment token count for admin dashboard
 app.get("/appointments/today-count", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const count = await getTodayTokenCount("appointment");
@@ -521,13 +586,11 @@ app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res
 app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, desc, price, category, img, stock, lowStockThreshold, unit } = req.body;
-    if (!name || !price)
-      return res.status(400).json({ message: "Name and price are required" });
+    if (!name || !price) return res.status(400).json({ message: "Name and price are required" });
     const medicine = new Medicine({
       name: name.trim(), desc: desc || "", price: Number(price),
       category: category || "General", img: img || "",
-      stock: Number(stock) || 100,
-      lowStockThreshold: Number(lowStockThreshold) || 10,
+      stock: Number(stock) || 100, lowStockThreshold: Number(lowStockThreshold) || 10,
       unit: unit || "units", isActive: true,
     });
     await medicine.save();
@@ -582,9 +645,7 @@ app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, r
 app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicine = await Medicine.findByIdAndUpdate(
-      req.params.id,
-      { isActive: false, updatedAt: new Date() },
-      { new: true }
+      req.params.id, { isActive: false, updatedAt: new Date() }, { new: true }
     );
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
     res.json({ message: "Medicine removed from store" });
@@ -594,27 +655,21 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
 });
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
-
-// POST /orders — online order with atomic ORD-xxx token
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
     if (!items || !items.length || !total)
       return res.status(400).json({ message: "Missing items or total" });
 
-    // ✅ TOKEN: get atomic token before saving
     const { token, tokenStr, date } = await getNextToken("order");
 
     const order = new Order({
       userId:      req.user.id,
       orderType:   "online",
-      items,
-      total:       Number(total),
+      items, total: Number(total),
       paymentMethod: paymentMethod || "cash",
       status:      "Pending",
-      tokenNumber: token,    // ✅
-      tokenStr,              // ✅
-      tokenDate:   date,     // ✅
+      tokenNumber: token, tokenStr, tokenDate: date,
     });
     await order.save();
 
@@ -626,21 +681,11 @@ app.post("/orders", authenticateToken, async (req, res) => {
     }
 
     await order.populate("userId", "name email phone");
-
     console.log(`🛒 Online order | Token: ${tokenStr} | Total: Rs.${total}`);
 
-    // Respond immediately — never wait for email
     res.status(201).json({ message: "Order placed successfully", order });
 
-    // Fire-and-forget email with token included
-    sendOrderEmails({
-      order,
-      userEmail:    req.user.email,
-      items,
-      total,
-      paymentMethod,
-      tokenStr,     // ✅ pass token to email
-    });
+    sendOrderEmails({ order, userEmail: req.user.email, items, total, paymentMethod, tokenStr });
 
   } catch (err) {
     console.error("❌ Error saving order:", err);
@@ -648,7 +693,6 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-// POST /orders/walk-in — walk-in order with atomic WLK-xxx token
 app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
@@ -657,12 +701,10 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
     if (!guestName && !existingUserId)
       return res.status(400).json({ message: "Customer name is required" });
 
-    // ✅ TOKEN: walk-in gets its own WLK series
     const { token, tokenStr, date } = await getNextToken("walkin");
 
     let userId    = null;
     let guestInfo = { name: "", phone: "" };
-
     if (existingUserId) {
       userId = existingUserId;
     } else {
@@ -674,16 +716,11 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
     }
 
     const order = new Order({
-      userId,
-      guestInfo,
-      orderType:   "walk-in",
-      items,
-      total:       Number(total),
+      userId, guestInfo, orderType: "walk-in",
+      items, total: Number(total),
       paymentMethod: paymentMethod || "cash",
       status:      "Completed",
-      tokenNumber: token,    // ✅
-      tokenStr,              // ✅
-      tokenDate:   date,     // ✅
+      tokenNumber: token, tokenStr, tokenDate: date,
     });
     await order.save();
 
@@ -695,9 +732,7 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
     }
 
     if (userId) await order.populate("userId", "name email phone");
-
-    console.log(`🏪 Walk-in order | Token: ${tokenStr} | Customer: ${guestName} | Total: Rs.${total}`);
-
+    console.log(`🏪 Walk-in | Token: ${tokenStr} | Customer: ${guestName}`);
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
     console.error("❌ Error saving walk-in order:", err);
@@ -748,8 +783,7 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
     const now = new Date();
     const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
     const todayEnd   = new Date(now); todayEnd.setHours(23,59,59,999);
-    const weekStart  = new Date(now);
-    weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
+    const weekStart  = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     const allOrders = await Order.find({ status: { $nin: ["Cancelled"] } }).sort({ createdAt: 1 });
@@ -785,20 +819,10 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
       const s    = statsFor(allOrders, from, to);
       dailyChart.push({
         date:    day.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
-        revenue: s.revenue,
-        orders:  s.orders,
+        revenue: s.revenue, orders: s.orders,
       });
     }
 
-    const todayStats   = statsFor(allOrders, todayStart, todayEnd);
-    const weekStats    = statsFor(allOrders, weekStart,  todayEnd);
-    const monthStats   = statsFor(allOrders, monthStart, todayEnd);
-    const allTimeStats = {
-      orders:  allOrders.length,
-      revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0),
-    };
-
-    // ✅ TOKEN: include today's token counts in analytics response
     const [aptTokens, orderTokens, walkinTokens] = await Promise.all([
       getTodayTokenCount("appointment"),
       getTodayTokenCount("order"),
@@ -807,39 +831,33 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
 
     res.json({
       today: {
-        ...todayStats,
+        ...statsFor(allOrders, todayStart, todayEnd),
         topMedicines: topMedsFrom(
-          allOrders.filter(
-            (o) => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd
-          )
+          allOrders.filter((o) => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd)
         ),
       },
-      week:         { ...weekStats  },
-      month:        { ...monthStats },
-      allTime:      allTimeStats,
+      week:         { ...statsFor(allOrders, weekStart, todayEnd)  },
+      month:        { ...statsFor(allOrders, monthStart, todayEnd) },
+      allTime: {
+        orders:  allOrders.length,
+        revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0),
+      },
       dailyChart,
       topMedicines: topMedsFrom(allOrders, 10),
-      // ✅ TOKEN: how many of each token type issued today
-      todayTokens: {
-        appointments: aptTokens,    // APT-001 ... APT-{n}
-        onlineOrders: orderTokens,  // ORD-001 ... ORD-{n}
-        walkInOrders: walkinTokens, // WLK-001 ... WLK-{n}
-      },
+      todayTokens:  { appointments: aptTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
     });
-
   } catch (err) {
     console.error("Analytics error:", err);
     res.status(500).json({ message: "Error computing analytics" });
   }
 });
 
-// ─── PROTECTED TEST ───────────────────────────────────────────────────────────
 app.get("/protected", authenticateToken, (req, res) => {
   res.json({ message: "Protected route working", user: req.user });
 });
 
-// ─── START SERVER ─────────────────────────────────────────────────────────────
+// ─── START SERVER (use server.listen, NOT app.listen) ─────────────────────────
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log("Server running on port " + PORT + " 🚀");
 });
