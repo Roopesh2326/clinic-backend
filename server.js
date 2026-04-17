@@ -32,6 +32,7 @@ io.on("connection", (socket) => {
   });
 });
 
+// Helper: broadcast queue update to ALL connected clients
 const broadcastQueue = async (type) => {
   try {
     const state = await QueueState.findOne({ type });
@@ -64,7 +65,7 @@ mongoose
   .then(() => console.log("MongoDB connected ✅"))
   .catch((err) => console.error("MongoDB error ❌", err));
 
-// ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
+// ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 const authenticateToken = (req, res, next) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ message: "Access denied" });
@@ -81,7 +82,6 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// ─── STAFF MIDDLEWARE (from patch) ───────────────────────────────────────────
 // Staff OR admin can access staff routes
 const requireStaff = (req, res, next) => {
   if (req.user?.role !== "staff" && req.user?.role !== "admin")
@@ -244,7 +244,7 @@ const getTodayTokenCount = async (type) => {
 
 // ─── QUEUE ROUTES ─────────────────────────────────────────────────────────────
 
-// GET /queue/status?type=appointment|order|walkin
+// GET /queue/status?type=appointment|order|walkin  (used by frontend queue displays)
 app.get("/queue/status", async (req, res) => {
   try {
     const type = req.query.type || "appointment";
@@ -269,8 +269,49 @@ app.get("/queue/status", async (req, res) => {
   }
 });
 
-// GET /queue/today — today's appointment token queue (from patch)
-// Used by StaffDashboard / ReceptionDesk
+// GET /queue — public patient display screen endpoint
+// Returns current serving token + next 5 in queue for ALL types
+app.get("/queue", async (req, res) => {
+  try {
+    const todayIST = getTodayIST();
+
+    // Build response for each queue type
+    const buildQueueData = async (type) => {
+      let state = await QueueState.findOne({ type });
+      if (!state) state = await QueueState.create({ type, currentServing: 0 });
+
+      const totalIssued = await getTodayTokenCount(type);
+      const serving     = state.currentServing;
+      const prefix      = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
+
+      // Current token being served
+      const current = serving > 0
+        ? { tokenStr: `${prefix}-${String(serving).padStart(3, "0")}`, number: serving }
+        : null;
+
+      // Next 5 tokens not yet served
+      const next = [];
+      for (let i = serving + 1; i <= Math.min(serving + 5, totalIssued); i++) {
+        next.push({ tokenStr: `${prefix}-${String(i).padStart(3, "0")}`, number: i });
+      }
+
+      return { type, current, next, totalIssued, lastUpdated: state.lastUpdated };
+    };
+
+    const [appointment, order, walkin] = await Promise.all([
+      buildQueueData("appointment"),
+      buildQueueData("order"),
+      buildQueueData("walkin"),
+    ]);
+
+    res.json({ appointment, order, walkin, serverTime: new Date().toISOString() });
+  } catch (err) {
+    console.error("[Queue] GET /queue error:", err);
+    res.status(500).json({ message: "Error fetching queue" });
+  }
+});
+
+// GET /queue/today — today's appointment queue (used by StaffDashboard / ReceptionDesk)
 app.get("/queue/today", authenticateToken, async (req, res) => {
   try {
     const todayIST = getTodayIST();
@@ -315,7 +356,7 @@ app.get("/queue/today", authenticateToken, async (req, res) => {
   }
 });
 
-// POST /queue/next — admin advances queue
+// POST /queue/next — admin advances queue (concurrency-safe)
 app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
@@ -330,6 +371,7 @@ app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
       { upsert: true, new: true }
     );
 
+    // Cap — never go past the last issued token
     if (state.currentServing > totalIssued && totalIssued > 0) {
       await QueueState.updateOne({ type }, { $set: { currentServing: totalIssued } });
       state.currentServing = totalIssued;
@@ -357,7 +399,7 @@ app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// POST /queue/reset — admin resets queue for a type
+// POST /queue/reset — admin resets a queue to 0 (start of day)
 app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
@@ -378,7 +420,8 @@ app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// ─── REGISTER ─────────────────────────────────────────────────────────────────
+// ─── AUTH ROUTES ──────────────────────────────────────────────────────────────
+
 app.post("/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
   try {
@@ -400,7 +443,6 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// ─── LOGIN ────────────────────────────────────────────────────────────────────
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -427,13 +469,11 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ─── LOGOUT ───────────────────────────────────────────────────────────────────
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
   res.json({ message: "Logged out" });
 });
 
-// ─── PROFILE ──────────────────────────────────────────────────────────────────
 app.get("/profile", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
@@ -444,7 +484,6 @@ app.get("/profile", authenticateToken, async (req, res) => {
   }
 });
 
-// ─── FORGOT PASSWORD ──────────────────────────────────────────────────────────
 app.post("/forgot-password", async (req, res) => {
   const { email, phone, newPassword } = req.body;
   if (!email || !phone || !newPassword)
@@ -465,7 +504,8 @@ app.post("/forgot-password", async (req, res) => {
   }
 });
 
-// ─── USERS ────────────────────────────────────────────────────────────────────
+// ─── USER ROUTES ──────────────────────────────────────────────────────────────
+
 app.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await User.find().select("-password");
@@ -488,7 +528,8 @@ app.get("/users/search", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// ─── APPOINTMENTS ─────────────────────────────────────────────────────────────
+// ─── APPOINTMENT ROUTES ───────────────────────────────────────────────────────
+
 const filePath = "appointments.json";
 let appointments = [];
 if (fs.existsSync(filePath)) {
@@ -574,7 +615,8 @@ app.get("/appointments/today-count", authenticateToken, requireAdmin, async (req
   }
 });
 
-// ─── NOTICES ──────────────────────────────────────────────────────────────────
+// ─── NOTICE ROUTES ────────────────────────────────────────────────────────────
+
 app.get("/notice", async (req, res) => {
   try {
     const notice = await Notice.findOne();
@@ -604,7 +646,8 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
   res.json({ message: "Notice deleted" });
 });
 
-// ─── MEDICINES ────────────────────────────────────────────────────────────────
+// ─── MEDICINE ROUTES ──────────────────────────────────────────────────────────
+
 app.get("/medicines", async (req, res) => {
   try {
     const medicines = await Medicine.find({ isActive: true }).sort({ createdAt: -1 });
@@ -706,9 +749,9 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
   }
 });
 
-// ─── ORDERS ───────────────────────────────────────────────────────────────────
+// ─── ORDER ROUTES ─────────────────────────────────────────────────────────────
 
-// POST /orders — online order
+// POST /orders — patient places an online order
 app.post("/orders", authenticateToken, async (req, res) => {
   try {
     const { items, total, paymentMethod } = req.body;
@@ -742,6 +785,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
 
     res.status(201).json({ message: "Order placed successfully", order });
 
+    // Fire-and-forget — never block the response
     sendOrderEmails({ order, userEmail: req.user.email, items, total, paymentMethod, tokenStr });
 
   } catch (err) {
@@ -750,7 +794,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-// POST /orders/walk-in — admin walk-in order
+// POST /orders/walk-in — admin creates a walk-in order via POS
 app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
@@ -803,7 +847,7 @@ app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-// GET /orders — admin gets ALL orders
+// GET /orders — admin fetches all orders
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find()
@@ -815,7 +859,7 @@ app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// GET /orders/my — user gets their own orders
+// GET /orders/my — patient fetches their own orders
 app.get("/orders/my", authenticateToken, async (req, res) => {
   try {
     const userId = new mongoose.Types.ObjectId(req.user.id);
@@ -826,11 +870,11 @@ app.get("/orders/my", authenticateToken, async (req, res) => {
   }
 });
 
-// PATCH /orders/:id/status — admin updates order status
+// PATCH /orders/:id/status — admin updates any order status
 app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body;
-    const allowed = ["Pending","Approved","Out for Delivery","Delivered","Cancelled","Completed"];
+    const allowed = ["Pending", "Approved", "Out for Delivery", "Delivered", "Cancelled", "Completed"];
     if (!allowed.includes(status))
       return res.status(400).json({ message: "Invalid status value" });
     const order = await Order.findByIdAndUpdate(
@@ -843,9 +887,9 @@ app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res
   }
 });
 
-// ─── STAFF ORDER ROUTES (from patch) ─────────────────────────────────────────
+// ─── STAFF ORDER ROUTES ───────────────────────────────────────────────────────
 
-// GET /staff/orders — staff + admin can view all orders (limited to 200)
+// GET /staff/orders — staff + admin view orders (limited to 200 for performance)
 app.get("/staff/orders", authenticateToken, requireStaff, async (req, res) => {
   try {
     const orders = await Order.find()
@@ -879,12 +923,13 @@ app.patch("/staff/orders/:id/status", authenticateToken, requireStaff, async (re
 });
 
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
+
 app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const now = new Date();
-    const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
-    const todayEnd   = new Date(now); todayEnd.setHours(23,59,59,999);
-    const weekStart  = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0,0,0,0);
+    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+    const weekStart  = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0, 0, 0, 0);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     const allOrders = await Order.find({ status: { $nin: ["Cancelled"] } }).sort({ createdAt: 1 });
@@ -918,8 +963,8 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
     const dailyChart = [];
     for (let i = 6; i >= 0; i--) {
       const day  = new Date(now); day.setDate(now.getDate() - i);
-      const from = new Date(day); from.setHours(0,0,0,0);
-      const to   = new Date(day); to.setHours(23,59,59,999);
+      const from = new Date(day); from.setHours(0, 0, 0, 0);
+      const to   = new Date(day); to.setHours(23, 59, 59, 999);
       const s    = statsFor(allOrders, from, to);
       dailyChart.push({
         date:    day.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
@@ -943,7 +988,7 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
           )
         ),
       },
-      week:    { ...statsFor(allOrders, weekStart, todayEnd)  },
+      week:    { ...statsFor(allOrders, weekStart, todayEnd) },
       month:   { ...statsFor(allOrders, monthStart, todayEnd) },
       allTime: {
         orders:  allOrders.length,
@@ -968,7 +1013,7 @@ app.get("/protected", authenticateToken, (req, res) => {
   res.json({ message: "Protected route working", user: req.user });
 });
 
-// ─── START SERVER ─────────────────────────────────────────────────────────────
+// ─── START SERVER (server.listen, NOT app.listen — required for Socket.io) ───
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log("Server running on port " + PORT + " 🚀");
