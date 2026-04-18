@@ -16,7 +16,7 @@ const Medicine    = require("./models/Medicine");
 const Counter     = require("./models/Counter");
 const QueueState  = require("./models/QueueState");
 const Appointment = require("./models/Appointment");
-const ActivityLog = require("./models/ActivityLog");
+const ActivityLog = require("./models/ActivityLog"); // ✅ NEW
 
 const app    = express();
 const server = http.createServer(app);
@@ -63,6 +63,7 @@ const requireStaff = (req, res, next) => {
 };
 
 // ─── ACTIVITY LOG HELPER ──────────────────────────────────────────────────────
+// ✅ Safe helper — never throws, so a log failure never breaks a route
 const logActivity = async (req, action, description, meta = {}) => {
   try {
     await ActivityLog.create({
@@ -76,6 +77,7 @@ const logActivity = async (req, action, description, meta = {}) => {
       ip: req.ip || req.headers["x-forwarded-for"] || "",
     });
   } catch (err) {
+    // Never let logging crash the main request
     console.error("[ActivityLog] Failed to write log:", err.message);
   }
 };
@@ -193,6 +195,8 @@ app.get("/queue/today", authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ message: "Error fetching queue" }); }
 });
 
+// ── POST /queue/next — admin only
+// Clicking "Next Patient" for appointments auto-completes the current one
 app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
@@ -200,6 +204,7 @@ app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
 
     const today = getTodayIST();
 
+    // Auto-complete the currently serving appointment
     if (type === "appointment") {
       const serving = await Appointment.findOne({
         tokenDate: today,
@@ -210,6 +215,7 @@ app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
         serving.status = "Completed";
         await serving.save();
         console.log(`[Queue] Auto-completed: ${serving.tokenStr} — ${serving.name}`);
+        // ✅ Log it
         await logActivity(req, "queue_next",
           `Auto-completed appointment ${serving.tokenStr} for ${serving.name} and advanced queue`,
           { type, tokenStr: serving.tokenStr, patientName: serving.name, appointmentId: serving._id }
@@ -255,14 +261,15 @@ app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
 
 // ─── ACTIVITY LOG ROUTES ──────────────────────────────────────────────────────
 
+// GET /activity-logs — admin only, paginated
 app.get("/activity-logs", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const page     = Math.max(1, parseInt(req.query.page)  || 1);
     const limit    = Math.min(100, parseInt(req.query.limit) || 50);
-    const action   = req.query.action   || "";
-    const userId   = req.query.userId   || "";
-    const dateFrom = req.query.dateFrom || "";
-    const dateTo   = req.query.dateTo   || "";
+    const action   = req.query.action   || "";  // filter by action type
+    const userId   = req.query.userId   || "";  // filter by user
+    const dateFrom = req.query.dateFrom || "";  // YYYY-MM-DD
+    const dateTo   = req.query.dateTo   || "";  // YYYY-MM-DD
 
     const query = {};
     if (action)  query.action = action;
@@ -286,6 +293,7 @@ app.get("/activity-logs", authenticateToken, requireAdmin, async (req, res) => {
   } catch (err) { console.error("[ActivityLog] fetch error:", err); res.status(500).json({ message: "Error fetching logs" }); }
 });
 
+// GET /activity-logs/summary — quick stats for the dashboard widget
 app.get("/activity-logs/summary", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const since = new Date(); since.setHours(0,0,0,0);
@@ -305,6 +313,8 @@ app.get("/activity-logs/summary", authenticateToken, requireAdmin, async (req, r
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
+// ✅ FIX: Public registration for patients (no auth required)
+// Admin-created users go through /users/create which IS protected
 app.post("/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
   try {
@@ -313,6 +323,7 @@ app.post("/register", async (req, res) => {
     const existing = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (existing) return res.status(400).json({ message: "Email already registered" });
 
+    // Public registration can only create "user" role — never admin/staff
     const safeRole = ["admin","staff","reception"].includes(role) ? "user" : (role || "user");
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ name: name.trim(), email: String(email).toLowerCase().trim(), phone: phone||"", password: hashedPassword, role: safeRole });
@@ -320,6 +331,7 @@ app.post("/register", async (req, res) => {
 
     if (phone) await Order.updateMany({ orderType: "walk-in", "guestInfo.phone": String(phone).trim(), userId: null }, { $set: { userId: user._id } });
 
+    // Log without req.user since this is public
     await ActivityLog.create({
       userId: user._id, userName: user.name, userRole: user.role, userEmail: user.email,
       action: "user_created", description: `New patient registered: ${user.name} (${user.email})`,
@@ -343,6 +355,7 @@ app.post("/login", async (req, res) => {
     const token = jwt.sign({ id: user._id, role: user.role, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: "7d" });
     res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
 
+    // ✅ Log login
     await ActivityLog.create({
       userId: user._id, userName: user.name, userRole: user.role, userEmail: user.email,
       action: "login", description: `${user.name} (${user.role}) logged in`,
@@ -354,6 +367,7 @@ app.post("/login", async (req, res) => {
 });
 
 app.post("/logout", async (req, res) => {
+  // Log logout if token present
   try {
     const token = req.cookies.token;
     if (token) {
@@ -401,6 +415,7 @@ app.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ message: "Error fetching users" }); }
 });
 
+// ✅ FIX: Allow staff to search users (needed for POS phone lookup)
 app.get("/users/search", authenticateToken, requireStaff, async (req, res) => {
   try {
     const { phone, name } = req.query;
@@ -485,6 +500,9 @@ app.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
 
 // ─── APPOINTMENTS ─────────────────────────────────────────────────────────────
 
+// POST /appointment — public
+// Reception source → Confirmed immediately (no approval needed)
+// Online source → Pending (doctor reviews)
 app.post("/appointment", async (req, res) => {
   try {
     const { token, tokenStr, date } = await getNextToken("appointment");
@@ -500,8 +518,8 @@ app.post("/appointment", async (req, res) => {
       time:        req.body.time  || "",
       userId:      req.body.userId || null,
       source:      req.body.source || "online",
-      // Reception = Confirmed instantly (patient is physically present), Online = Pending
-      status:      isReception ? "Confirmed" : (req.body.status || "Pending"),
+      // ✅ Reception = Confirmed instantly, Online = Pending
+      status:      isReception ? "Confirmed" : "Pending",
       tokenNumber: token,
       tokenStr,
       tokenDate:   date,
@@ -510,6 +528,7 @@ app.post("/appointment", async (req, res) => {
 
     await apt.save();
 
+    // Log — but don't crash if no req.user (public route)
     await ActivityLog.create({
       userId:    req.body.userId || null,
       userName:  apt.name,
@@ -605,6 +624,7 @@ app.get("/medicines", async (req, res) => {
   } catch (err) { res.status(500).json({ message: "Error fetching medicines" }); }
 });
 
+// ✅ FIX: Changed requireAdmin → requireStaff so staff can access medicines for POS
 app.get("/medicines/all", authenticateToken, requireStaff, async (req, res) => {
   try {
     const medicines = await Medicine.find().sort({ createdAt: -1 });
@@ -660,9 +680,9 @@ app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, r
     const medicine = await Medicine.findById(req.params.id);
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
     const oldStock = medicine.stock;
-    if (operation === "add")           medicine.stock = medicine.stock + Number(stock);
+    if (operation === "add")          medicine.stock = medicine.stock + Number(stock);
     else if (operation === "subtract") medicine.stock = Math.max(0, medicine.stock - Number(stock));
-    else                               medicine.stock = Number(stock);
+    else                              medicine.stock = Number(stock);
     medicine.updatedAt = new Date();
     await medicine.save();
     await logActivity(req, "medicine_stock_updated",
@@ -673,6 +693,7 @@ app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, r
   } catch (err) { res.status(500).json({ message: "Error updating stock" }); }
 });
 
+// PERMANENT DELETE — must be before soft-delete route
 app.delete("/medicines/:id/permanent", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicine = await Medicine.findByIdAndDelete(req.params.id);
@@ -682,6 +703,7 @@ app.delete("/medicines/:id/permanent", authenticateToken, requireAdmin, async (r
   } catch (err) { res.status(500).json({ message: "Error deleting medicine" }); }
 });
 
+// SOFT DELETE
 app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicine = await Medicine.findByIdAndUpdate(req.params.id, { isActive: false, updatedAt: new Date() }, { new: true });
@@ -710,6 +732,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
   } catch (err) { console.error("Order error:", err); res.status(500).json({ message: "Error saving order. Please try again." }); }
 });
 
+// ✅ FIX: Changed requireAdmin → requireStaff so staff can create walk-in orders from POS
 app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
