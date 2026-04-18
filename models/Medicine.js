@@ -16,6 +16,9 @@ const MedicineSchema = new mongoose.Schema({
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
+  supplier:           { type: String, default: "" },   // e.g. "Sun Pharma", "Cipla"
+  expiryDate:         { type: String, default: "" },   // "YYYY-MM-DD"
+  entryDate:          { type: String, default: "" },   // "YYYY-MM-DD" — date stock was added
 });
 
 // Virtual: is this medicine out of stock?
