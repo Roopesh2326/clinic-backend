@@ -34,7 +34,7 @@ app.use(cookieParser());
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
 mongoose
-  .connect(process.env.MONGODB_URI)
+  .connect(process.env.MONGODB_URI || "mongodb+srv://roopeshdeep:32Qwerfdsa@cluster0.00b27mo.mongodb.net/clinicDB")
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error", err));
 
@@ -52,7 +52,6 @@ const requireAdmin = (req, res, next) => {
   if (req.user?.role !== "admin") return res.status(403).json({ message: "Admin access required" });
   next();
 };
-// staff OR admin
 const requireStaff = (req, res, next) => {
   if (req.user?.role !== "staff" && req.user?.role !== "admin")
     return res.status(403).json({ message: "Staff access required" });
@@ -114,8 +113,6 @@ const getTodayTokenCount = async (type) => {
 };
 
 // ─── QUEUE ROUTES ─────────────────────────────────────────────────────────────
-
-// GET /queue/status — public, single type
 app.get("/queue/status", async (req, res) => {
   try {
     const type = req.query.type || "appointment";
@@ -127,129 +124,55 @@ app.get("/queue/status", async (req, res) => {
   } catch (err) { res.status(500).json({ message: "Error fetching queue status" }); }
 });
 
-// GET /queue — public, all types — used by TV/tablet Queue Display screen
+// GET /queue — TV Queue Display screen (combined all types)
 app.get("/queue", async (req, res) => {
   try {
-    const types  = ["appointment","order","walkin"];
+    const types = ["appointment","order","walkin"];
     const result = {};
     await Promise.all(types.map(async (type) => {
       let state = await QueueState.findOne({ type });
       if (!state) state = { currentServing: 0, lastUpdated: new Date() };
       const totalIssued = await getTodayTokenCount(type);
-      const serving     = state.currentServing || 0;
-      const prefix      = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
-      const next        = [];
+      const serving = state.currentServing || 0;
+      const prefix = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
+      const next = [];
       for (let i = serving + 1; i <= Math.min(serving + 5, totalIssued); i++) {
         next.push({ number: i, tokenStr: `${prefix}-${String(i).padStart(3,"0")}` });
       }
       result[type] = {
-        current:      serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3,"0")}` } : null,
+        current: serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3,"0")}` } : null,
         next,
         totalIssued,
-        lastUpdated:  state.lastUpdated,
+        lastUpdated: state.lastUpdated,
       };
     }));
     res.json(result);
   } catch (err) { console.error("[Queue Display]", err); res.status(500).json({ message: "Error fetching queue" }); }
 });
 
-// GET /appointments/today — PUBLIC, today's appointments only, for ReceptionDesk queue panel
-// Safe to be public: only exposes today's data with limited fields, no PII beyond name/contact
-app.get("/appointments/today", async (req, res) => {
-  try {
-    const today = getTodayIST();
-    const apts  = await Appointment.find({ tokenDate: today, status: { $ne: "Cancelled" } })
-      .sort({ tokenNumber: 1 })
-      .select("name tokenStr tokenNumber tokenDate status contact bookedAt source");
-    res.json(apts);
-  } catch (err) { res.status(500).json({ message: "Error fetching today queue" }); }
-});
-
-// GET /queue/today — authenticated, detailed queue summary
 app.get("/queue/today", authenticateToken, async (req, res) => {
   try {
-    const start     = new Date(); start.setHours(0,0,0,0);
-    const end       = new Date(); end.setHours(23,59,59,999);
+    const start = new Date(); start.setHours(0,0,0,0);
+    const end   = new Date(); end.setHours(23,59,59,999);
     const todayApts = await Appointment.find({ bookedAt: { $gte: start, $lte: end }, status: { $ne: "Cancelled" } }).sort({ tokenNumber: 1 });
-    const serving   = todayApts.find(a => a.status === "Confirmed") || todayApts.find(a => a.status === "Pending");
-    const waiting   = todayApts.filter(a => a !== serving && (a.status === "Pending" || a.status === "Confirmed"));
+    const serving = todayApts.find(a => a.status === "Confirmed") || todayApts.find(a => a.status === "Pending");
+    const waiting = todayApts.filter(a => a !== serving && a.status === "Pending");
     res.json({ date: getTodayIST(), total: todayApts.length, done: todayApts.filter(a=>a.status==="Completed").length, waiting: waiting.length, serving: serving||null, queue: waiting.slice(0,10), allTokens: todayApts });
   } catch (err) { res.status(500).json({ message: "Error fetching queue" }); }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-// POST /queue/next — admin only
-//
-// CHANGED BEHAVIOUR (appointment type):
-//   1. Find the appointment currently being served (lowest tokenNumber with
-//      status Confirmed or Pending) and mark it "Completed" automatically.
-//   2. Increment the QueueState counter so the next patient is now serving.
-//   3. Broadcast the update via Socket.io.
-//
-// Doctor workflow: tap "Next Patient" once → current patient auto-completes,
-// next token appears on the display.  No separate "mark completed" step.
-// ══════════════════════════════════════════════════════════════════════════════
 app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
     if (!["appointment","order","walkin"].includes(type)) return res.status(400).json({ message: "Invalid type" });
-
-    const today = getTodayIST();
-
-    // ── Step 1: Auto-complete the currently serving appointment ──────────
-    if (type === "appointment") {
-      const serving = await Appointment.findOne({
-        tokenDate: today,
-        status:    { $in: ["Confirmed", "Pending"] },
-      }).sort({ tokenNumber: 1 });          // lowest active token = currently serving
-
-      if (serving) {
-        serving.status = "Completed";
-        await serving.save();
-        console.log(`[Queue] Auto-completed: ${serving.tokenStr} — ${serving.name}`);
-      } else {
-        console.log("[Queue] No active appointment found to complete");
-      }
-    }
-
-    // ── Step 2: Increment the counter ────────────────────────────────────
     const totalIssued = await getTodayTokenCount(type);
-    const state = await QueueState.findOneAndUpdate(
-      { type },
-      { $inc: { currentServing: 1 }, $set: { lastUpdated: new Date() } },
-      { upsert: true, new: true }
-    );
-
-    // Cap so we don't go past the last issued token
-    if (state.currentServing > totalIssued && totalIssued > 0) {
-      await QueueState.updateOne({ type }, { $set: { currentServing: totalIssued } });
-      state.currentServing = totalIssued;
-    }
-
-    // ── Step 3: Broadcast to queue display + admin panel ─────────────────
-    io.emit("queue:update", {
-      type,
-      currentServing: state.currentServing,
-      totalIssued,
-      lastUpdated:    state.lastUpdated,
-    });
-
-    console.log(`[Queue] ${type} → now serving #${state.currentServing} of ${totalIssued}`);
-
-    res.json({
-      message:        `Now serving ${type} #${state.currentServing}`,
-      type,
-      currentServing: state.currentServing,
-      totalIssued,
-      lastUpdated:    state.lastUpdated,
-    });
-  } catch (err) {
-    console.error("[Queue] next error:", err);
-    res.status(500).json({ message: "Error advancing queue" });
-  }
+    const state = await QueueState.findOneAndUpdate({ type }, { $inc: { currentServing: 1 }, $set: { lastUpdated: new Date() } }, { upsert: true, new: true });
+    if (state.currentServing > totalIssued && totalIssued > 0) { await QueueState.updateOne({ type }, { $set: { currentServing: totalIssued } }); state.currentServing = totalIssued; }
+    io.emit("queue:update", { type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
+    res.json({ message: `Now serving ${type} #${state.currentServing}`, type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
+  } catch (err) { res.status(500).json({ message: "Error advancing queue" }); }
 });
 
-// POST /queue/reset — admin only
 app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
@@ -329,6 +252,7 @@ app.get("/users/search", authenticateToken, requireAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ message: "Error searching users" }); }
 });
 
+// POST /users/create
 app.post("/users/create", authenticateToken, requireAdmin, async (req, res) => {
   const { name, email, phone, password, role } = req.body;
   if (!name || !email || !password) return res.status(400).json({ message: "Name, email and password are required" });
@@ -394,58 +318,23 @@ app.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // ─── APPOINTMENTS ─────────────────────────────────────────────────────────────
-
-// ══════════════════════════════════════════════════════════════════════════════
-// POST /appointment — public (patients and receptionist both use this)
-//
-// CHANGED BEHAVIOUR:
-//   source === "reception"  → status = "Confirmed"  (immediate, no approval step)
-//   source === "online"     → status = "Pending"    (admin reviews before confirming)
-//
-// The receptionist's ReceptionDesk.jsx already sends source: "reception".
-// Online booking pages send source: "online" (or omit it — defaults to Pending).
-// ══════════════════════════════════════════════════════════════════════════════
 app.post("/appointment", async (req, res) => {
   try {
     const { token, tokenStr, date } = await getNextToken("appointment");
-    const isReception = String(req.body.source || "").toLowerCase() === "reception";
-
     const apt = new Appointment({
-      name:        String(req.body.name    || "").trim(),
-      age:         String(req.body.age     || ""),
-      problem:     String(req.body.problem || ""),
-      contact:     String(req.body.contact || "").trim(),
-      email:       String(req.body.email   || ""),
-      date:        req.body.date  || "",
-      time:        req.body.time  || "",
-      userId:      req.body.userId || null,
-      source:      req.body.source || "online",
-      // ✅ Reception → Confirmed instantly (joins queue immediately)
-      // ✅ Online    → Pending (waits for doctor to confirm)
-      status:      isReception ? "Confirmed" : "Pending",
-      tokenNumber: token,
-      tokenStr,
-      tokenDate:   date,
-      bookedAt:    req.body.bookedAt ? new Date(req.body.bookedAt) : new Date(),
+      name: String(req.body.name||"").trim(), age: String(req.body.age||""),
+      problem: String(req.body.problem||""), contact: String(req.body.contact||"").trim(),
+      email: String(req.body.email||""), date: req.body.date||"", time: req.body.time||"",
+      userId: req.body.userId||null, source: req.body.source||"online",
+      tokenNumber: token, tokenStr, tokenDate: date,
+      bookedAt: req.body.bookedAt ? new Date(req.body.bookedAt) : new Date(),
     });
-
     await apt.save();
-    console.log(`[Appointment] ${tokenStr} | ${apt.name} | Status: ${apt.status} | Source: ${apt.source}`);
-
-    res.json({
-      message:     "Appointment booked successfully!",
-      tokenNumber: token,
-      tokenStr,
-      tokenDate:   date,
-      status:      apt.status,   // ← included so frontend can show correct badge
-    });
-  } catch (err) {
-    console.error("Appointment error:", err);
-    res.status(500).json({ message: "Error saving appointment" });
-  }
+    console.log(`Appointment | Token: ${tokenStr} | Patient: ${req.body.name}`);
+    res.json({ message: "Appointment booked successfully!", tokenNumber: token, tokenStr, tokenDate: date });
+  } catch (err) { console.error("Appointment error:", err); res.status(500).json({ message: "Error saving appointment" }); }
 });
 
-// GET /appointments — admin only, all appointments
 app.get("/appointments", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const apts = await Appointment.find().sort({ bookedAt: -1 }).populate("userId", "name email phone");
@@ -453,19 +342,17 @@ app.get("/appointments", authenticateToken, requireAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ message: "Error fetching appointments" }); }
 });
 
-// GET /appointments/my — patient's own appointments
 app.get("/appointments/my", authenticateToken, async (req, res) => {
   try {
-    const userId    = req.user.id;
-    const user      = await User.findById(userId).select("phone");
+    const userId = req.user.id;
+    const user   = await User.findById(userId).select("phone");
     const userPhone = user?.phone ? String(user.phone).trim() : null;
-    const query     = { $or: [{ userId: new mongoose.Types.ObjectId(userId) }, ...(userPhone ? [{ contact: userPhone }] : [])] };
-    const apts      = await Appointment.find(query).sort({ bookedAt: -1 });
+    const query = { $or: [{ userId: new mongoose.Types.ObjectId(userId) }, ...(userPhone ? [{ contact: userPhone }] : [])] };
+    const apts = await Appointment.find(query).sort({ bookedAt: -1 });
     res.json(apts);
   } catch (err) { res.status(500).json({ message: "Error fetching appointments" }); }
 });
 
-// PATCH /appointments/:id/status — admin manual override always available
 app.patch("/appointments/:id/status", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body;
@@ -509,6 +396,7 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
 
 // ─── MEDICINES ────────────────────────────────────────────────────────────────
 // IMPORTANT: /medicines/:id/permanent MUST be before /medicines/:id
+// Otherwise Express matches "permanent" as an :id parameter
 
 app.get("/medicines", async (req, res) => {
   try {
@@ -580,7 +468,7 @@ app.delete("/medicines/:id/permanent", authenticateToken, requireAdmin, async (r
   } catch (err) { console.error("Permanent delete error:", err); res.status(500).json({ message: "Error deleting medicine" }); }
 });
 
-// SOFT DELETE
+// SOFT DELETE — hides from store
 app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicine = await Medicine.findByIdAndUpdate(req.params.id, { isActive: false, updatedAt: new Date() }, { new: true });
@@ -672,7 +560,7 @@ app.patch("/staff/orders/:id/status", authenticateToken, requireStaff, async (re
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const now        = new Date();
+    const now = new Date();
     const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
     const todayEnd   = new Date(now); todayEnd.setHours(23,59,59,999);
     const weekStart  = new Date(now); weekStart.setDate(now.getDate()-6); weekStart.setHours(0,0,0,0);
@@ -700,20 +588,15 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
       const s = statsFor(allOrders, from, to);
       dailyChart.push({ date: day.toLocaleDateString("en-IN",{day:"numeric",month:"short"}), revenue: s.revenue, orders: s.orders });
     }
-    const [aptTokens, orderTokens, walkinTokens] = await Promise.all([
-      getTodayTokenCount("appointment"),
-      getTodayTokenCount("order"),
-      getTodayTokenCount("walkin"),
-    ]);
+    const [aptTokens, orderTokens, walkinTokens] = await Promise.all([getTodayTokenCount("appointment"), getTodayTokenCount("order"), getTodayTokenCount("walkin")]);
     const todayOrders = allOrders.filter(o => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd);
     res.json({
-      today:   { ...statsFor(allOrders, todayStart, todayEnd), topMedicines: topMedsFrom(todayOrders) },
-      week:    { ...statsFor(allOrders, weekStart, todayEnd) },
-      month:   { ...statsFor(allOrders, monthStart, todayEnd) },
+      today: { ...statsFor(allOrders, todayStart, todayEnd), topMedicines: topMedsFrom(todayOrders) },
+      week:  { ...statsFor(allOrders, weekStart, todayEnd) },
+      month: { ...statsFor(allOrders, monthStart, todayEnd) },
       allTime: { orders: allOrders.length, revenue: allOrders.reduce((s,o)=>s+Number(o.total||0),0) },
-      dailyChart,
-      topMedicines: topMedsFrom(allOrders, 10),
-      todayTokens:  { appointments: aptTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
+      dailyChart, topMedicines: topMedsFrom(allOrders, 10),
+      todayTokens: { appointments: aptTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
     });
   } catch (err) { console.error("Analytics error:", err); res.status(500).json({ message: "Error computing analytics" }); }
 });
