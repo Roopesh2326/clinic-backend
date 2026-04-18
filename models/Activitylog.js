@@ -12,7 +12,7 @@ const ActivityLogSchema = new mongoose.Schema({
     type: String,
     required: true,
     enum: [
-      // Auth
+      // Authorization
       "login", "logout",
       // Orders
       "order_created", "order_status_changed", "walkin_order_created",
