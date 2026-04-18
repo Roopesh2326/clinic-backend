@@ -16,7 +16,7 @@ const Medicine    = require("./models/Medicine");
 const Counter     = require("./models/Counter");
 const QueueState  = require("./models/QueueState");
 const Appointment = require("./models/Appointment");
-const ActivityLog = require("./models/Activitylog"); // ✅ FIXED: was "Activitylog" (lowercase L) — crashed every route that called ActivityLog.create()
+const ActivityLog = require("./models/ActivityLog"); // ✅ FIXED: was "Activitylog" (lowercase L) — crashed every route that called ActivityLog.create()
 
 const app    = express();
 const server = http.createServer(app);
