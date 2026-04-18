@@ -16,7 +16,7 @@ const Medicine    = require("./models/Medicine");
 const Counter     = require("./models/Counter");
 const QueueState  = require("./models/QueueState");
 const Appointment = require("./models/Appointment");
-const ActivityLog = require("./models/ActivityLog"); // ✅ NEW
+const ActivityLog = require("./models/ActivityLog"); 
 
 const app    = express();
 const server = http.createServer(app);
