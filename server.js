@@ -37,7 +37,7 @@ app.use(cookieParser());
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
 mongoose
-  .connect(process.env.MONGODB_URI)
+  .connect(process.env.MONGODB_URI || "mongodb+srv://roopeshdeep:32Qwerfdsa@cluster0.00b27mo.mongodb.net/clinicDB")
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error", err));
 
