@@ -1,34 +1,27 @@
 const mongoose = require("mongoose");
 
 const MedicineSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true },
-  desc: { type: String, default: "" },
-  price: { type: Number, required: true },
-  category: { type: String, default: "General" },
-  img: { type: String, default: "" },
+  name:              { type: String, required: true, trim: true },
+  desc:              { type: String, default: "" },
+  price:             { type: Number, required: true },
+  category:          { type: String, default: "General" },
+  img:               { type: String, default: "" },
+  stock:             { type: Number, default: 100 },
+  lowStockThreshold: { type: Number, default: 10 },
+  unit:              { type: String, default: "units" },
+  isActive:          { type: Boolean, default: true },
 
-  // ✅ INVENTORY FIELDS
-  stock: { type: Number, default: 100 },       // current stock count
-  lowStockThreshold: { type: Number, default: 10 }, // alert when stock <= this
-  unit: { type: String, default: "units" },    // units, bottles, strips, etc.
-
-  isActive: { type: Boolean, default: true },  // false = hidden from store
+  // ✅ NEW — inventory tracking fields
+  supplier:    { type: String, default: "" },  // "Sun Pharma", "Cipla", etc.
+  expiryDate:  { type: String, default: "" },  // "YYYY-MM-DD"
+  entryDate:   { type: String, default: "" },  // "YYYY-MM-DD" — when stock was added
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
-  supplier:           { type: String, default: "" },   // e.g. "Sun Pharma", "Cipla"
-  expiryDate:         { type: String, default: "" },   // "YYYY-MM-DD"
-  entryDate:          { type: String, default: "" },   // "YYYY-MM-DD" — date stock was added
 });
 
-// Virtual: is this medicine out of stock?
-MedicineSchema.virtual("isOutOfStock").get(function () {
-  return this.stock <= 0;
-});
-
-// Virtual: is this medicine low on stock?
-MedicineSchema.virtual("isLowStock").get(function () {
-  return this.stock > 0 && this.stock <= this.lowStockThreshold;
-});
+MedicineSchema.index({ name: 1 });
+MedicineSchema.index({ isActive: 1 });
+MedicineSchema.index({ category: 1 });
 
 module.exports = mongoose.model("Medicine", MedicineSchema);
