@@ -16,8 +16,6 @@ const Medicine    = require("./models/Medicine");
 const Counter     = require("./models/Counter");
 const QueueState  = require("./models/QueueState");
 const Appointment = require("./models/Appointment");
-// ⚠️  CASE-SENSITIVE on Render (Linux). File MUST be named: models/ActivityLog.js
-//     Capital A, capital L — if it's wrong the server crashes at startup.
 const ActivityLog = require("./models/ActivityLog");
 
 const app    = express();
@@ -612,14 +610,14 @@ app.delete("/notice", authenticateToken, requireAdmin, async (req, res) => {
 // ─── MEDICINES ────────────────────────────────────────────────────────────────
 // ⚠️  /medicines/:id/permanent MUST stay defined BEFORE /medicines/:id
 //     Otherwise Express matches "permanent" as the :id param
-
+ 
 app.get("/medicines", async (req, res) => {
   try {
     const medicines = await Medicine.find({ isActive: true }).sort({ createdAt: -1 });
     res.json(medicines);
   } catch (err) { res.status(500).json({ message: "Error fetching medicines" }); }
 });
-
+ 
 // requireStaff: staff need to see full inventory to manage stock & orders
 app.get("/medicines/all", authenticateToken, requireStaff, async (req, res) => {
   try {
@@ -627,23 +625,24 @@ app.get("/medicines/all", authenticateToken, requireStaff, async (req, res) => {
     res.json(medicines);
   } catch (err) { res.status(500).json({ message: "Error fetching medicines" }); }
 });
-
+ 
 app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const medicines = await Medicine.find({ isActive: true, $expr: { $lte: ["$stock","$lowStockThreshold"] } });
     res.json(medicines);
   } catch (err) { res.status(500).json({ message: "Error fetching low stock" }); }
 });
-
+ 
 app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { name, desc, price, category, img, stock, lowStockThreshold, unit, supplier } = req.body;
+    const { name, desc, price, category, img, stock, lowStockThreshold, unit, supplier, expiryDate, entryDate } = req.body;
     if (!name || !price) return res.status(400).json({ message: "Name and price are required" });
     const medicine = new Medicine({
       name: name.trim(), desc: desc||"", price: Number(price),
       category: category||"General", img: img||"",
       stock: Number(stock)||100, lowStockThreshold: Number(lowStockThreshold)||10,
       unit: unit||"units", supplier: supplier||"",
+      expiryDate: expiryDate||"", entryDate: entryDate||"",
       isActive: true,
     });
     await medicine.save();
@@ -654,10 +653,10 @@ app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
     res.status(201).json({ message: "Medicine added successfully", medicine });
   } catch (err) { res.status(500).json({ message: "Error adding medicine" }); }
 });
-
+ 
 app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { name, desc, price, category, img, stock, lowStockThreshold, unit, isActive, supplier } = req.body;
+    const { name, desc, price, category, img, stock, lowStockThreshold, unit, isActive, supplier, expiryDate, entryDate } = req.body;
     const medicine = await Medicine.findByIdAndUpdate(req.params.id, {
       ...(name && { name: name.trim() }), ...(desc !== undefined && { desc }),
       ...(price && { price: Number(price) }), ...(category && { category }),
@@ -665,6 +664,8 @@ app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
       ...(lowStockThreshold !== undefined && { lowStockThreshold: Number(lowStockThreshold) }),
       ...(unit && { unit }), ...(isActive !== undefined && { isActive }),
       ...(supplier !== undefined && { supplier }),
+      ...(expiryDate !== undefined && { expiryDate }),
+      ...(entryDate !== undefined && { entryDate }),
       updatedAt: new Date(),
     }, { new: true });
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
@@ -674,7 +675,7 @@ app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
     res.json({ message: "Medicine updated successfully", medicine });
   } catch (err) { res.status(500).json({ message: "Error updating medicine" }); }
 });
-
+ 
 app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { stock, operation } = req.body;
@@ -693,7 +694,7 @@ app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, r
     res.json({ message: "Stock updated", medicine });
   } catch (err) { res.status(500).json({ message: "Error updating stock" }); }
 });
-
+ 
 // PERMANENT DELETE — must be before the soft-delete route
 app.delete("/medicines/:id/permanent", authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -705,7 +706,7 @@ app.delete("/medicines/:id/permanent", authenticateToken, requireAdmin, async (r
     res.json({ message: "Medicine permanently deleted" });
   } catch (err) { res.status(500).json({ message: "Error deleting medicine" }); }
 });
-
+ 
 // SOFT DELETE — hides from store, keeps DB record
 app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
