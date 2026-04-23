@@ -101,8 +101,19 @@ mongoose
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
 const authenticateToken = (req, res, next) => {
-  const token = req.cookies.token;
+  // Check cookie first
+  let token = req.cookies.token;
+  
+  // Fallback to Authorization header
+  if (!token) {
+    const authHeader = req.headers["authorization"];
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.split(" ")[1];
+    }
+  }
+  
   if (!token) return res.status(401).json({ message: "Access denied" });
+  
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ message: "Invalid token" });
     req.user = user;
@@ -510,6 +521,7 @@ app.post("/login", loginLimiter, async (req, res) => {
       email: user.email,
       phone: user.phone,
       userId: user._id,
+      token: token,
     });
   } catch (err) {
     console.error("[Login]", err);
