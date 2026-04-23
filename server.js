@@ -42,27 +42,31 @@ const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
+// ✅ FIX: If FRONTEND_URL not set in Render env vars, allow all origins
+// so the deployed frontend is never blocked by CORS
+const corsOriginFn = (origin, callback) => {
+  if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+  return callback(new Error("Not allowed by CORS"));
+};
+const corsOptions = {
+  origin: process.env.FRONTEND_URL ? corsOriginFn : true,
+  credentials: true,
+};
+
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: { origin: ALLOWED_ORIGINS, credentials: true },
+  cors: corsOptions,
 });
 io.on("connection",  (socket) => console.log(`[Socket] connected: ${socket.id}`));
 io.on("disconnect",  (socket) => console.log(`[Socket] disconnected: ${socket.id}`));
 
 // ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
 app.use(helmet());
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) callback(null, true);
-    else callback(new Error("Not allowed by CORS"));
-  },
-  credentials: true,
-}));
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
 app.use(mongoSanitize({
     allowDots: true,
-    replaceWith: '_',
 })); // prevent NoSQL injection
 
 // ─── RATE LIMITERS ────────────────────────────────────────────────────────────
@@ -1000,7 +1004,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/orders/walk-in", authenticateToken, requireAdmin, async (req, res) => {
+app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => { // ✅ FIX: staff can create walk-in orders
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
     if (!items || !items.length || !total)
