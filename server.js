@@ -45,18 +45,15 @@ const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
-// Allow origins — works with any frontend URL 
-// const corsOptions = {
-//   origin: true,
-//   credentials: true,
-// };
+//  Allow origins — works with any frontend URL 
+const corsOptions = {
+  origin: true,
+  credentials: true,
+};
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: {
-    origin: ALLOWED_ORIGINS,
-    credentials: true,
-  },
+  cors: corsOptions,
 });
 io.on("connection",  (socket) => console.log(`[Socket] connected: ${socket.id}`));
 io.on("disconnect",  (socket) => console.log(`[Socket] disconnected: ${socket.id}`));
