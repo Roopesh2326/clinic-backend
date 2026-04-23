@@ -45,17 +45,13 @@ app.set("trust proxy", 1);
 // ].filter(Boolean);
 
 //  Allow origins — works with any frontend URL 
-app.use(cors({
-  origin: function (origin, callback) {
-    const allowed = ["http://localhost:3000", "http://localhost:5173", "https://clinic-frontend-rho.vercel.app"];
-    if (!origin || allowed.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS Blocked'));
-    }
-  },
-  credentials: true
-}));
+const corsOptions = {
+  origin: [
+    "http://localhost:3000",
+    "https://clinic-frontend-rho.vercel.app"
+  ],
+  credentials: true,
+};
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
@@ -1192,7 +1188,7 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
       allTime:      { orders: allOrders.length, revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0) },
       dailyChart,
       topMedicines: topMedsFrom(allOrders, 10),
-      todayTokens:  { appointments: aptaTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
+      todayTokens:  { appointments: aptTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
     });
   } catch (err) {
     console.error("Analytics error:", err);
