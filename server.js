@@ -14,7 +14,6 @@ const mongoose      = require("mongoose");
 const express       = require("express");
 const cors          = require("cors");
 const rateLimit     = require("express-rate-limit");
-const mongoSanitize = require("express-mongo-sanitize");
 const helmet        = require("helmet");
 const nodemailer    = require("nodemailer");
 const jwt           = require("jsonwebtoken");
@@ -72,18 +71,22 @@ const loginLimiter = rateLimit({
   message: { message: "Too many login attempts. Please try again in 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.ip || "unknown",
 });
 
 const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 10,
   message: { message: "Too many registrations from this IP. Try again later." },
+  keyGenerator: (req) => req.ip || "unknown",
 });
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
   message: { message: "Too many requests. Please slow down." },
+  keyGenerator: (req) => req.ip || "unknown",
+  skip: (req) => req.path === "/ping" || req.path === "/",
 });
 
 app.use(generalLimiter);
