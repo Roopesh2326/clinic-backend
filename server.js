@@ -35,6 +35,9 @@ const ActivityLog = require("./models/ActivityLog");
 const app    = express();
 const server = http.createServer(app);
 
+// TRUST PROXY - required for Render/Hroku/Railway
+app.set("trust proxy", 1);
+
 // ─── ALLOWED ORIGINS ──────────────────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
   "http://localhost:3000",
@@ -42,15 +45,18 @@ const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
-// ✅ FIX: Allow all origins — works with any frontend URL on Render/Vercel
-const corsOptions = {
-  origin: true,
-  credentials: true,
-};
+// Allow origins — works with any frontend URL 
+// const corsOptions = {
+//   origin: true,
+//   credentials: true,
+// };
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: corsOptions,
+  cors: {
+    origin: ALLOWED_ORIGINS,
+    credentials: true,
+  },
 });
 io.on("connection",  (socket) => console.log(`[Socket] connected: ${socket.id}`));
 io.on("disconnect",  (socket) => console.log(`[Socket] disconnected: ${socket.id}`));
