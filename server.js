@@ -38,11 +38,11 @@ const server = http.createServer(app);
 app.set("trust proxy", 1);
 
 // ─── ALLOWED ORIGINS ──────────────────────────────────────────────────────────
-const ALLOWED_ORIGINS = [
-  "http://localhost:3000",
-  "http://localhost:5173",
-  process.env.FRONTEND_URL,
-].filter(Boolean);
+// const ALLOWED_ORIGINS = [
+//   "http://localhost:3000",
+//   "http://localhost:5173",
+//   process.env.FRONTEND_URL,
+// ].filter(Boolean);
 
 //  Allow origins — works with any frontend URL 
 const corsOptions = {
