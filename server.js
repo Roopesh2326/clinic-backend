@@ -46,12 +46,12 @@ app.set("trust proxy", 1);
 
 //  Allow origins — works with any frontend URL 
 const corsOptions = {
-  origin: [
-    "http://localhost:3000",
-    "https://clinic-frontend-rho.vercel.app"
-  ],
+  origin: "https://clinic-frontend-rho.vercel.app", // Use specific URL, not '*'
   credentials: true,
+  methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+  allowedHeaders: "Content-Type,Authorization",
 };
+app.use(cors(corsOptions));
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
@@ -84,12 +84,24 @@ const registerLimiter = rateLimit({
   keyGenerator: (req) => req.ip || "unknown",
 });
 
+// REPLACE WITH:
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 1000,  // ← increase this
   message: { message: "Too many requests. Please slow down." },
-  keyGenerator: (req) => req.ip || "unknown",
-  skip: (req) => req.path === "/ping" || req.path === "/",
+  keyGenerator: (req) => {
+    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+      || req.ip
+      || "unknown";
+  },
+  skip: (req) => {
+    // Never rate limit health and public routes
+    return req.path === "/ping" 
+      || req.path === "/"
+      || req.path === "/medicines"
+      || req.path === "/queue"
+      || req.path === "/notice";
+  },
 });
 
 app.use(generalLimiter);
@@ -1062,12 +1074,15 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
   }
 });
 
+
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find().populate("userId", "name email phone").sort({ createdAt: -1 });
+    if (!orders) return res.json([]); // Ensure always returning an array
     res.json(orders);
   } catch (err) {
-    res.status(500).json({ message: "Error fetching orders" });
+    console.error("Orders Fetch Error:", err);
+    res.status(500).json({ message: "Internal Server Error", error: err.message });
   }
 });
 
