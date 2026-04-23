@@ -87,7 +87,7 @@ const registerLimiter = rateLimit({
 // REPLACE WITH:
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 1000,  // ← increase this
+  max: 200, 
   message: { message: "Too many requests. Please slow down." },
   keyGenerator: (req) => {
     return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
