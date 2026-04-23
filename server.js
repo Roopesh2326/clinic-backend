@@ -1,11 +1,13 @@
 require("dotenv").config();
 
-// ─── ENV VALIDATION ──────────────────────────────────────────────────────────
+// ─── ENV VALIDATION — crash early if critical vars missing ───────────────────
 if (!process.env.JWT_SECRET) {
   console.error("FATAL: JWT_SECRET environment variable is not set");
+  process.exit(1);
 }
 if (!process.env.MONGODB_URI) {
   console.error("FATAL: MONGODB_URI environment variable is not set");
+  process.exit(1);
 }
 
 const mongoose      = require("mongoose");
@@ -32,18 +34,28 @@ const ActivityLog = require("./models/ActivityLog");
 const app    = express();
 const server = http.createServer(app);
 
-// TRUST PROXY - required for Render
+// TRUST PROXY - required for Render/Hroku/Railway
 app.set("trust proxy", 1);
 
 // ─── ALLOWED ORIGINS ──────────────────────────────────────────────────────────
-const corsOptions = {
-  origin: [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "https://clinic-frontend-rho.vercel.app"
-  ],
-  credentials: true,
-};
+// const ALLOWED_ORIGINS = [
+//   "http://localhost:3000",
+//   "http://localhost:5173",
+//   process.env.FRONTEND_URL,
+// ].filter(Boolean);
+
+//  Allow origins — works with any frontend URL 
+app.use(cors({
+  origin: function (origin, callback) {
+    const allowed = ["http://localhost:3000", "http://localhost:5173", "https://clinic-frontend-rho.vercel.app"];
+    if (!origin || allowed.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS Blocked'));
+    }
+  },
+  credentials: true
+}));
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
@@ -53,33 +65,34 @@ io.on("connection",  (socket) => console.log(`[Socket] connected: ${socket.id}`)
 io.on("disconnect",  (socket) => console.log(`[Socket] disconnected: ${socket.id}`));
 
 // ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet());
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
+// app.use(mongoSanitize()); // prevent NoSQL injection
 
 // ─── RATE LIMITERS ────────────────────────────────────────────────────────────
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
+  windowMs: 15 * 60 * 1000, // 15 minute
   max: 5,
   message: { message: "Too many login attempts. Please try again in 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.headers["x-forwarded-for"] || req.ip || "unknown",
+  keyGenerator: (req) => req.ip || "unknown",
 });
 
 const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, 
+  windowMs: 60 * 60 * 1000, // 1 hour
   max: 10,
   message: { message: "Too many registrations from this IP. Try again later." },
-  keyGenerator: (req) => req.headers["x-forwarded-for"] || req.ip || "unknown",
+  keyGenerator: (req) => req.ip || "unknown",
 });
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
   message: { message: "Too many requests. Please slow down." },
-  keyGenerator: (req) => req.headers["x-forwarded-for"] || req.ip || "unknown",
+  keyGenerator: (req) => req.ip || "unknown",
   skip: (req) => req.path === "/ping" || req.path === "/",
 });
 
@@ -93,12 +106,15 @@ mongoose
   .then(() => console.log("MongoDB connected"))
   .catch((err) => {
     console.error("MongoDB connection failed:", err);
+    process.exit(1);
   });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
 const authenticateToken = (req, res, next) => {
+  // Check cookie first
   let token = req.cookies.token;
   
+  // Fallback to Authorization header
   if (!token) {
     const authHeader = req.headers["authorization"];
     if (authHeader && authHeader.startsWith("Bearer ")) {
@@ -272,7 +288,7 @@ app.get("/queue", async (req, res) => {
         next.push({ number: i, tokenStr: `${prefix}-${String(i).padStart(3, "0")}` });
       }
       result[type] = {
-        current:      serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3, "0")}` } : null,
+        current:     serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3, "0")}` } : null,
         next,
         totalIssued,
         lastUpdated: state.lastUpdated,
@@ -285,11 +301,13 @@ app.get("/queue", async (req, res) => {
   }
 });
 
+// ── Protected with display key so patient data isn't fully public ─────────────
 app.get("/appointments/today", async (req, res) => {
   try {
     const displayKey = req.headers["x-display-key"];
     const cookieAuth = req.cookies.token;
 
+    // Allow if: valid display key OR logged in user
     if (!cookieAuth && displayKey !== process.env.DISPLAY_KEY) {
       return res.status(401).json({ message: "Unauthorized" });
     }
@@ -709,20 +727,20 @@ app.post("/appointment", async (req, res) => {
     const { token, tokenStr, date } = await getNextToken("appointment");
     const isReception = String(req.body.source || "").toLowerCase() === "reception";
     const apt = new Appointment({
-      name:         String(req.body.name     || "").trim(),
-      age:          String(req.body.age      || ""),
-      problem:      String(req.body.problem || ""),
-      contact:      String(req.body.contact || "").trim(),
-      email:        String(req.body.email   || ""),
-      date:         req.body.date  || "",
-      time:         req.body.time  || "",
-      userId:       req.body.userId || null,
-      source:       req.body.source || "online",
-      status:       isReception ? "Confirmed" : "Pending",
-      tokenNumber:  token,
+      name:        String(req.body.name    || "").trim(),
+      age:         String(req.body.age     || ""),
+      problem:     String(req.body.problem || ""),
+      contact:     String(req.body.contact || "").trim(),
+      email:       String(req.body.email   || ""),
+      date:        req.body.date  || "",
+      time:        req.body.time  || "",
+      userId:      req.body.userId || null,
+      source:      req.body.source || "online",
+      status:      isReception ? "Confirmed" : "Pending",
+      tokenNumber: token,
       tokenStr,
-      tokenDate:    date,
-      bookedAt:     req.body.bookedAt ? new Date(req.body.bookedAt) : new Date(),
+      tokenDate:   date,
+      bookedAt:    req.body.bookedAt ? new Date(req.body.bookedAt) : new Date(),
     });
     await apt.save();
     ActivityLog.create({
@@ -1004,7 +1022,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => { 
+app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => { // ✅ FIX: staff can create walk-in orders
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
     if (!items || !items.length || !total)
@@ -1114,7 +1132,7 @@ app.patch("/staff/orders/:id/status", authenticateToken, requireStaff, async (re
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const now         = new Date();
+    const now        = new Date();
     const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
     const todayEnd   = new Date(now); todayEnd.setHours(23, 59, 59, 999);
     const weekStart  = new Date(now); weekStart.setDate(now.getDate() - 6); weekStart.setHours(0, 0, 0, 0);
@@ -1137,7 +1155,7 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
         for (const item of (order.items || [])) {
           const key = item.name || "Unknown";
           if (!map[key]) map[key] = { name: key, totalQty: 0, totalRevenue: 0 };
-          map[key].totalQty      += Number(item.quantity || 1);
+          map[key].totalQty     += Number(item.quantity || 1);
           map[key].totalRevenue += Number(item.price || 0) * Number(item.quantity || 1);
         }
       }
@@ -1168,13 +1186,13 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
     );
 
     res.json({
-      today:         { ...statsFor(allOrders, todayStart, todayEnd), topMedicines: topMedsFrom(todayOrders) },
-      week:          { ...statsFor(allOrders, weekStart, todayEnd) },
-      month:         { ...statsFor(allOrders, monthStart, todayEnd) },
-      allTime:       { orders: allOrders.length, revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0) },
+      today:        { ...statsFor(allOrders, todayStart, todayEnd), topMedicines: topMedsFrom(todayOrders) },
+      week:         { ...statsFor(allOrders, weekStart, todayEnd) },
+      month:        { ...statsFor(allOrders, monthStart, todayEnd) },
+      allTime:      { orders: allOrders.length, revenue: allOrders.reduce((s, o) => s + Number(o.total || 0), 0) },
       dailyChart,
       topMedicines: topMedsFrom(allOrders, 10),
-      todayTokens:  { appointments: aptTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
+      todayTokens:  { appointments: aptaTokens, onlineOrders: orderTokens, walkInOrders: walkinTokens },
     });
   } catch (err) {
     console.error("Analytics error:", err);
