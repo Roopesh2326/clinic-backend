@@ -48,7 +48,7 @@ app.set("trust proxy", 1);
 const corsOptions = {
   origin: [
     "http://localhost:3000",
-    "https://clinic-frontend-rho.vercek.app"
+    "https://clinic-frontend-rho.vercel.app"
   ],
   credentials: true,
 };
