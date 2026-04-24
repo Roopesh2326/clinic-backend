@@ -36,7 +36,7 @@ const corsOptions = {
   origin: [
     "http://localhost:3000",
     "http://localhost:5173",
-    "https://clinic-frontend-rho.vercel.app",
+    process.env.FRONTEND_URL,
   ].filter(Boolean),
   credentials: true,
 };
