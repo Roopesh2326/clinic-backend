@@ -162,7 +162,7 @@ const logActivity = (req, action, description, meta = {}) => {
 app.get("/",     (req, res) => res.json({ status: "ok", ts: Date.now() }));
 app.get("/ping", (req, res) => res.json({ pong: true, ts: Date.now() }));
 
-app.options(".*", cors(corsOptions));
+app.options("(.*)", cors(corsOptions));
 
 // ─── NODEMAILER ───────────────────────────────────────────────────────────────
 require("dns").setDefaultResultOrder("ipv4first");
