@@ -44,50 +44,30 @@ const ALLOWED_ORIGINS = [
 ].filter(Boolean);
 
 // ✅ FIX: Allow all origins — works with any frontend URL on Render/Vercel
+// --- REPLACE FROM HERE ---
 const corsOptions = {
-  origin: true, // This allows any origin that makes the request - best for debugging
+  origin: true,
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cookie", "x-display-key"],
-  exposedHeaders: ["set-cookie"],
 };
 
-// ─── SOCKET.IO ────────────────────────────────────────────────────────────────
-const io = new Server(server, {
-  cors: {
-    origin: [
-      "https://clinic-frontend-rho.vercel.app",
-      "http://localhost:3000",
-      "http://localhost:5173",
-    ],
-    credentials: true,
-    methods: ["GET", "POST"],
-  },
-});
-
-io.on("connection", (socket) => {
-  console.log(`[Socket] connected: ${socket.id}`);
-  
-  socket.on("disconnect", () => {
-    console.log(`[Socket] disconnected: ${socket.id}`);
-  });
-});
-
-// ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
-app.use(helmet());
+// 1. Manually handle CORS and Preflights (Replaces line 165 and app.use(cors))
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
-  res.header("Access-Control-Allow-Credentials", "true");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie, x-display-key");
+  const origin = req.headers.origin;
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie, x-display-key");
   
   if (req.method === "OPTIONS") {
     return res.sendStatus(200);
   }
   next();
 });
+
+app.use(helmet({ crossOriginResourcePolicy: false })); // Fixes potential image loading issues
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
+// --- TO HERE ---
 // app.use(mongoSanitize()); // prevent NoSQL injection
 
 // ─── RATE LIMITERS ────────────────────────────────────────────────────────────
