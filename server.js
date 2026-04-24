@@ -38,8 +38,7 @@ const corsOptions = {
     "http://localhost:5173",
     process.env.FRONTEND_URL,
   ].filter(Boolean),
-  credentials: true,
-};
+  };
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, { cors: corsOptions });
