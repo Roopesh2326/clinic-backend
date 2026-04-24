@@ -700,6 +700,31 @@ app.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// PATCH /profile — user updates their own profile
+app.patch("/profile", authenticateToken, async (req, res) => {
+  try {
+    const { name, email, phone, password } = req.body;
+    const update = {};
+    if (name)  update.name  = name.trim();
+    if (email) update.email = String(email).toLowerCase().trim();
+    if (phone) update.phone = phone;
+    if (password) {
+      if (password.length < 6)
+        return res.status(400).json({ message: "Password must be at least 6 characters" });
+      update.password = await bcrypt.hash(password, 10);
+    }
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      update,
+      { new: true }
+    ).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json({ message: "Profile updated", user });
+  } catch (err) {
+    res.status(500).json({ message: "Error updating profile" });
+  }
+});
+
 // ─── APPOINTMENTS ─────────────────────────────────────────────────────────────
 app.post("/appointment", async (req, res) => {
   try {
