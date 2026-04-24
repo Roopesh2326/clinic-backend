@@ -1075,9 +1075,10 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
 
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const orders = await Order.find().populate("userId", "name email phone").sort({ createdAt: -1 });
-    res.json(orders);
-  } catch {
+    const orders = await Order.find().populate("userId", "name email phone").sort({ createdAt: -1 }).limit(50).lean();
+    res.json(orders || []);
+  } catch  (err) {
+    console.error("[Orders API Error:", err);
     res.status(500).json({ message: "Error fetching orders" });
   }
 });
