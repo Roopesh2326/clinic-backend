@@ -378,7 +378,7 @@ app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
       await QueueState.updateOne({ type }, { $set: { currentServing: totalIssued } });
       state.currentServing = totalIssued;
     }
-    io.emit("queue:update", { type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
+      emit("queue:update", { type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
     res.json({ message: `Now serving ${type} #${state.currentServing}`, type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
   } catch (err) {
     console.error("[Queue] next error:", err);
