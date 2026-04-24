@@ -34,6 +34,7 @@ const ActivityLog = require("./models/ActivityLog");
 
 const app    = express();
 const server = http.createServer(app);
+app.set("trust proxy", 1);
 
 // ─── ALLOWED ORIGINS ──────────────────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
@@ -69,18 +70,21 @@ const loginLimiter = rateLimit({
   message: { message: "Too many login attempts. Please try again in 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
 });
 
 const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 10,
   message: { message: "Too many registrations from this IP. Try again later." },
+  validate: { xForwardedForHeader: false },
 });
 
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
   message: { message: "Too many requests. Please slow down." },
+  validate: { xForwardedForHeader: false },
 });
 
 app.use(generalLimiter);
