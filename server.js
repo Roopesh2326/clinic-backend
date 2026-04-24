@@ -69,6 +69,14 @@ const io = new Server(server, {
   },
 });
 
+io.on("connection", (socket) => {
+  console.log(`[Socket] connected: ${socket.id}`);
+  
+  socket.on("disconnect", () => {
+    console.log(`[Socket] disconnected: ${socket.id}`);
+  });
+});
+
 // ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors(corsOptions));
@@ -396,7 +404,7 @@ app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
       { $set: { currentServing: 0, lastUpdated: new Date() } },
       { upsert: true, new: true }
     );
-    io.emit("queue:update", { type, currentServing: 0, totalIssued: 0, lastUpdated: new Date() });
+    io.emit("queue:update", { type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdate});
     logActivity(req, "queue_reset", `Reset ${type} queue to 0`, { type });
     res.json({ message: `${type} queue reset to 0` });
   } catch (err) {
