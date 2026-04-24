@@ -80,14 +80,14 @@ const registerLimiter = rateLimit({
   validate: { xForwardedForHeader: false },
 });
 
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  message: { message: "Too many requests. Please slow down." },
-  validate: { xForwardedForHeader: false },
-});
+// const generalLimiter = rateLimit({
+//   windowMs: 15 * 60 * 1000,
+//   max: 200,
+//   message: { message: "Too many requests. Please slow down." },
+//   validate: { xForwardedForHeader: false },
+// });
 
-app.use(generalLimiter);
+// app.use(generalLimiter);
 
 // ─── MONGODB ──────────────────────────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET;
