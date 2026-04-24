@@ -45,14 +45,10 @@ const ALLOWED_ORIGINS = [
 
 // ✅ FIX: Allow all origins — works with any frontend URL on Render/Vercel
 const corsOptions = {
-  origin: [
-    "https://clinic-frontend-rho.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173",
-  ],
+  origin: true, // This allows any origin that makes the request - best for debugging
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cookie", "x-display-key"],
   exposedHeaders: ["set-cookie"],
 };
 
