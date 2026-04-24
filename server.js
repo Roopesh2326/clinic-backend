@@ -1,26 +1,20 @@
 require("dotenv").config();
 
-// ─── ENV VALIDATION — crash early if critical vars missing ───────────────────
-if (!process.env.JWT_SECRET) {
-  console.error("FATAL: JWT_SECRET environment variable is not set");
-  process.exit(1);
-}
-if (!process.env.MONGODB_URI) {
-  console.error("FATAL: MONGODB_URI environment variable is not set");
-  process.exit(1);
-}
+// ─── ENV VALIDATION ───────────────────────────────────────────────────────────
+if (!process.env.JWT_SECRET) { console.error("FATAL: JWT_SECRET not set"); process.exit(1); }
+if (!process.env.MONGODB_URI) { console.error("FATAL: MONGODB_URI not set"); process.exit(1); }
 
-const mongoose      = require("mongoose");
-const express       = require("express");
-const cors          = require("cors");
-const rateLimit     = require("express-rate-limit");
-const helmet        = require("helmet");
-const nodemailer    = require("nodemailer");
-const jwt           = require("jsonwebtoken");
-const bcrypt        = require("bcryptjs");
-const cookieParser  = require("cookie-parser");
-const http          = require("http");
-const { Server }    = require("socket.io");
+const mongoose     = require("mongoose");
+const express      = require("express");
+const cors         = require("cors");
+const rateLimit    = require("express-rate-limit");
+const helmet       = require("helmet");
+const nodemailer   = require("nodemailer");
+const jwt          = require("jsonwebtoken");
+const bcrypt       = require("bcryptjs");
+const cookieParser = require("cookie-parser");
+const http         = require("http");
+const { Server }   = require("socket.io");
 
 const Order       = require("./models/Order");
 const Notice      = require("./models/Notice");
@@ -34,104 +28,119 @@ const ActivityLog = require("./models/ActivityLog");
 const app    = express();
 const server = http.createServer(app);
 
-// TRUST PROXY - required for Render/Hroku/Railway
+// ─── TRUST PROXY (required for Render) ───────────────────────────────────────
 app.set("trust proxy", 1);
 
-// ─── ALLOWED ORIGINS ──────────────────────────────────────────────────────────
-// const ALLOWED_ORIGINS = [
-//   "http://localhost:3000",
-//   "http://localhost:5173",
-//   process.env.FRONTEND_URL,
-// ].filter(Boolean);
-
-//  Allow origins — works with any frontend URL 
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 const corsOptions = {
-  origin: "https://clinic-frontend-rho.vercel.app", // Use specific URL, not '*'
+  origin: [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://clinic-frontend-rho.vercel.app",
+  ].filter(Boolean),
   credentials: true,
-  methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-  allowedHeaders: "Content-Type,Authorization",
 };
-app.use(cors(corsOptions));
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
-const io = new Server(server, {
-  cors: corsOptions,
-});
-io.on("connection",  (socket) => console.log(`[Socket] connected: ${socket.id}`));
-io.on("disconnect",  (socket) => console.log(`[Socket] disconnected: ${socket.id}`));
+const io = new Server(server, { cors: corsOptions });
+io.on("connection",  (s) => console.log(`[Socket] connected: ${s.id}`));
+io.on("disconnect",  (s) => console.log(`[Socket] disconnected: ${s.id}`));
 
-// ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
+// ─── CORE MIDDLEWARE ──────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
-// app.use(mongoSanitize()); // prevent NoSQL injection
+
+// ─── SAFE NoSQL SANITIZER (replaces express-mongo-sanitize) ──────────────────
+// express-mongo-sanitize crashes on newer Node/Express because it tries to SET
+// req.query which is a read-only getter. This inline version only touches req.body.
+function stripDangerousKeys(obj) {
+  if (obj === null || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map(stripDangerousKeys);
+  const clean = {};
+  for (const key of Object.keys(obj)) {
+    if (key.startsWith("$") || key.includes(".")) continue;
+    clean[key] = stripDangerousKeys(obj[key]);
+  }
+  return clean;
+}
+app.use((req, _res, next) => {
+  if (req.body && typeof req.body === "object") req.body = stripDangerousKeys(req.body);
+  next();
+});
 
 // ─── RATE LIMITERS ────────────────────────────────────────────────────────────
+// !! ROOT CAUSE OF 503 !!
+// Old limit: 200 req/15min. Admin polls 5 endpoints every 15s = 20 req/min = 300/15min → OVER LIMIT.
+// Fix 1: Raise general limit to 2000.
+// Fix 2: Skip rate limiting for authenticated users (they carry a valid JWT).
+// Fix 3: Skip health endpoints.
+
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// Helper: check if request has a valid JWT (cookie or Bearer header)
+const isAuthenticated = (req) => {
+  try {
+    const cookieToken = req.cookies?.token;
+    const bearerToken = req.headers?.authorization?.startsWith("Bearer ")
+      ? req.headers.authorization.split(" ")[1]
+      : null;
+    const token = cookieToken || bearerToken;
+    if (!token) return false;
+    jwt.verify(token, JWT_SECRET);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minute
-  max: 5,
-  message: { message: "Too many login attempts. Please try again in 15 minutes." },
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { message: "Too many login attempts. Try again in 15 minutes." },
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => req.ip || "unknown",
 });
 
 const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 10,
+  windowMs: 60 * 60 * 1000,
+  max: 20,
   message: { message: "Too many registrations from this IP. Try again later." },
   keyGenerator: (req) => req.ip || "unknown",
 });
 
-// REPLACE WITH:
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200, 
+  max: 2000, // ← raised from 200. Handles heavy admin polling comfortably.
   message: { message: "Too many requests. Please slow down." },
-  keyGenerator: (req) => {
-    return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
-      || req.ip
-      || "unknown";
-  },
+  keyGenerator: (req) => req.ip || "unknown",
+  // Skip health checks AND authenticated users entirely — they are trusted
   skip: (req) => {
-    // Never rate limit health and public routes
-    return req.path === "/ping" 
-      || req.path === "/"
-      || req.path === "/medicines"
-      || req.path === "/queue"
-      || req.path === "/notice";
+    if (req.path === "/ping" || req.path === "/") return true;
+    if (isAuthenticated(req)) return true; // ← authenticated → no rate limit
+    return false;
   },
 });
 
 app.use(generalLimiter);
 
 // ─── MONGODB ──────────────────────────────────────────────────────────────────
-const JWT_SECRET = process.env.JWT_SECRET;
-
 mongoose
   .connect(process.env.MONGODB_URI)
   .then(() => console.log("MongoDB connected"))
-  .catch((err) => {
-    console.error("MongoDB connection failed:", err);
-    process.exit(1);
-  });
+  .catch((err) => { console.error("MongoDB connection failed:", err); process.exit(1); });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
 const authenticateToken = (req, res, next) => {
-  // Check cookie first
-  let token = req.cookies.token;
-  
-  // Fallback to Authorization header
+  // Check HTTP-only cookie first, then Authorization header
+  let token = req.cookies?.token;
   if (!token) {
     const authHeader = req.headers["authorization"];
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      token = authHeader.split(" ")[1];
-    }
+    if (authHeader?.startsWith("Bearer ")) token = authHeader.split(" ")[1];
   }
-  
   if (!token) return res.status(401).json({ message: "Access denied" });
-  
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ message: "Invalid token" });
     req.user = user;
@@ -139,15 +148,24 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Admin only
 const requireAdmin = (req, res, next) => {
   if (req.user?.role !== "admin")
     return res.status(403).json({ message: "Admin access required" });
   next();
 };
 
+// Admin or staff
 const requireStaff = (req, res, next) => {
-  if (req.user?.role !== "staff" && req.user?.role !== "admin")
+  if (!["admin", "staff"].includes(req.user?.role))
     return res.status(403).json({ message: "Staff access required" });
+  next();
+};
+
+// Admin, staff, OR reception — used for queue & appointment status routes
+const requireClinicStaff = (req, res, next) => {
+  if (!["admin", "staff", "reception"].includes(req.user?.role))
+    return res.status(403).json({ message: "Clinic staff access required" });
   next();
 };
 
@@ -158,14 +176,12 @@ const logActivity = (req, action, description, meta = {}) => {
     userName:  req.user?.name  || req.user?.email || "Unknown",
     userRole:  req.user?.role  || "unknown",
     userEmail: req.user?.email || "",
-    action,
-    description,
-    meta,
+    action, description, meta,
     ip: req.headers["x-forwarded-for"] || req.ip || "",
   }).catch((err) => console.error("[ActivityLog] write failed:", err.message));
 };
 
-// ─── HEALTH + KEEP-ALIVE ──────────────────────────────────────────────────────
+// ─── HEALTH ───────────────────────────────────────────────────────────────────
 app.get("/",     (req, res) => res.json({ status: "ok", ts: Date.now() }));
 app.get("/ping", (req, res) => res.json({ pong: true, ts: Date.now() }));
 
@@ -276,30 +292,28 @@ app.get("/queue/status", async (req, res) => {
     if (!state) state = await QueueState.create({ type, currentServing: 0 });
     const totalIssued = await getTodayTokenCount(type);
     res.json({ type, currentServing: state.currentServing, totalIssued, nextToken: totalIssued + 1, lastUpdated: state.lastUpdated });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching queue status" });
   }
 });
 
 app.get("/queue", async (req, res) => {
   try {
-    const types  = ["appointment", "order", "walkin"];
+    const types = ["appointment", "order", "walkin"];
     const result = {};
     await Promise.all(types.map(async (type) => {
       let state = await QueueState.findOne({ type });
       if (!state) state = { currentServing: 0, lastUpdated: new Date() };
       const totalIssued = await getTodayTokenCount(type);
-      const serving     = state.currentServing || 0;
-      const prefix      = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
-      const next        = [];
+      const serving = state.currentServing || 0;
+      const prefix = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
+      const next = [];
       for (let i = serving + 1; i <= Math.min(serving + 5, totalIssued); i++) {
         next.push({ number: i, tokenStr: `${prefix}-${String(i).padStart(3, "0")}` });
       }
       result[type] = {
-        current:     serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3, "0")}` } : null,
-        next,
-        totalIssued,
-        lastUpdated: state.lastUpdated,
+        current: serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3, "0")}` } : null,
+        next, totalIssued, lastUpdated: state.lastUpdated,
       };
     }));
     res.json(result);
@@ -309,40 +323,33 @@ app.get("/queue", async (req, res) => {
   }
 });
 
-// ── Protected with display key so patient data isn't fully public ─────────────
+// Public queue display (protected by display key OR logged-in user)
 app.get("/appointments/today", async (req, res) => {
   try {
     const displayKey = req.headers["x-display-key"];
     const cookieAuth = req.cookies.token;
-
-    // Allow if: valid display key OR logged in user
-    if (!cookieAuth && displayKey !== process.env.DISPLAY_KEY) {
+    if (!cookieAuth && displayKey !== process.env.DISPLAY_KEY)
       return res.status(401).json({ message: "Unauthorized" });
-    }
-
     const today = getTodayIST();
-    const apts  = await Appointment.find({
-      tokenDate: today,
-      status: { $ne: "Cancelled" },
-    })
+    const apts = await Appointment.find({ tokenDate: today, status: { $ne: "Cancelled" } })
       .sort({ tokenNumber: 1 })
       .select("name tokenStr tokenNumber tokenDate status contact bookedAt source");
     res.json(apts);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching today queue" });
   }
 });
 
 app.get("/queue/today", authenticateToken, async (req, res) => {
   try {
-    const start     = new Date(); start.setHours(0, 0, 0, 0);
-    const end       = new Date(); end.setHours(23, 59, 59, 999);
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const end   = new Date(); end.setHours(23, 59, 59, 999);
     const todayApts = await Appointment.find({
       bookedAt: { $gte: start, $lte: end },
       status: { $ne: "Cancelled" },
     }).sort({ tokenNumber: 1 });
     const serving = todayApts.find(a => a.status === "Confirmed") || todayApts.find(a => a.status === "Pending");
-    const waiting = todayApts.filter(a => a !== serving && (a.status === "Pending" || a.status === "Confirmed"));
+    const waiting = todayApts.filter(a => a !== serving && ["Pending", "Confirmed"].includes(a.status));
     res.json({
       date: getTodayIST(),
       total: todayApts.length,
@@ -352,12 +359,13 @@ app.get("/queue/today", authenticateToken, async (req, res) => {
       queue: waiting.slice(0, 10),
       allTokens: todayApts,
     });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching queue" });
   }
 });
 
-app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
+// FIXED: requireAdmin → requireClinicStaff so reception can also advance queue
+app.post("/queue/next", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
     if (!["appointment", "order", "walkin"].includes(type))
@@ -399,7 +407,8 @@ app.post("/queue/next", authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
+// FIXED: requireAdmin → requireClinicStaff
+app.post("/queue/reset", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
     if (!["appointment", "order", "walkin"].includes(type))
@@ -412,7 +421,7 @@ app.post("/queue/reset", authenticateToken, requireAdmin, async (req, res) => {
     io.emit("queue:update", { type, currentServing: 0, totalIssued: 0, lastUpdated: new Date() });
     logActivity(req, "queue_reset", `Reset ${type} queue to 0`, { type });
     res.json({ message: `${type} queue reset to 0` });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error resetting queue" });
   }
 });
@@ -459,7 +468,7 @@ app.get("/activity-logs/summary", authenticateToken, requireAdmin, async (req, r
       ]),
     ]);
     res.json({ todayCount, totalCount, recentLogs, actionBreakdown });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching summary" });
   }
 });
@@ -520,11 +529,7 @@ app.post("/login", loginLimiter, async (req, res) => {
       JWT_SECRET,
       { expiresIn: "7d" }
     );
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "None",
-    });
+    res.cookie("token", token, { httpOnly: true, secure: true, sameSite: "None" });
     ActivityLog.create({
       userId: user._id, userName: user.name, userRole: user.role, userEmail: user.email,
       action: "login",
@@ -532,15 +537,7 @@ app.post("/login", loginLimiter, async (req, res) => {
       meta: {},
       ip: req.headers["x-forwarded-for"] || req.ip || "",
     }).catch(() => {});
-    res.json({
-      message: "Login successful",
-      role: user.role,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      userId: user._id,
-      token: token,
-    });
+    res.json({ message: "Login successful", role: user.role, name: user.name, email: user.email, phone: user.phone, userId: user._id, token });
   } catch (err) {
     console.error("[Login]", err);
     res.status(500).json({ message: "Error logging in" });
@@ -558,8 +555,7 @@ app.post("/logout", (req, res) => {
           userRole: decoded.role, userEmail: decoded.email,
           action: "logout",
           description: `${decoded.name || decoded.email} logged out`,
-          meta: {},
-          ip: req.ip || "",
+          meta: {}, ip: req.ip || "",
         }).catch(() => {});
       }
     }
@@ -573,7 +569,7 @@ app.get("/profile", authenticateToken, async (req, res) => {
     const user = await User.findById(req.user.id).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
     res.json(user);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching profile" });
   }
 });
@@ -592,7 +588,7 @@ app.post("/forgot-password", async (req, res) => {
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
     res.json({ message: "Password reset successful" });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Failed to reset password" });
   }
 });
@@ -602,7 +598,7 @@ app.get("/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await User.find().select("-password").sort({ createdAt: -1 });
     res.json(users || []);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching users" });
   }
 });
@@ -615,7 +611,7 @@ app.get("/users/search", authenticateToken, requireStaff, async (req, res) => {
     if (name)  query.name  = { $regex: String(name).trim(),  $options: "i" };
     const users = await User.find(query).select("-password").limit(10);
     res.json(users);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error searching users" });
   }
 });
@@ -632,11 +628,8 @@ app.post("/users/create", authenticateToken, requireAdmin, async (req, res) => {
     if (existing) return res.status(400).json({ message: "Email already exists" });
     const hashed = await bcrypt.hash(password, 10);
     const user = new User({
-      name: name.trim(),
-      email: String(email).toLowerCase().trim(),
-      phone: phone || "",
-      password: hashed,
-      role: role || "user",
+      name: name.trim(), email: String(email).toLowerCase().trim(),
+      phone: phone || "", password: hashed, role: role || "user",
     });
     await user.save();
     logActivity(req, "user_created",
@@ -662,18 +655,16 @@ app.patch("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
     if (phone) update.phone = phone;
     if (role)  update.role  = role;
     if (password) {
-      if (password.length < 6)
-        return res.status(400).json({ message: "Password must be at least 6 characters" });
+      if (password.length < 6) return res.status(400).json({ message: "Password must be at least 6 characters" });
       update.password = await bcrypt.hash(password, 10);
     }
     const user = await User.findByIdAndUpdate(req.params.id, update, { new: true }).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
-    logActivity(req, "user_updated",
-      `Updated user: ${user.name} (${user.email})`,
+    logActivity(req, "user_updated", `Updated user: ${user.name} (${user.email})`,
       { targetUserId: req.params.id, changes: Object.keys(update).filter(k => k !== "password") }
     );
     res.json({ message: "User updated", user });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating user" });
   }
 });
@@ -687,7 +678,7 @@ app.patch("/users/:id/role", authenticateToken, requireAdmin, async (req, res) =
     if (!user) return res.status(404).json({ message: "User not found" });
     logActivity(req, "user_updated", `Changed role of ${user.name} to ${role}`, { targetUserId: req.params.id, newRole: role });
     res.json({ message: "Role updated", user });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating role" });
   }
 });
@@ -704,11 +695,8 @@ app.patch("/users/:id/disable", authenticateToken, requireAdmin, async (req, res
       `${user.isDisabled ? "Disabled" : "Enabled"} account for ${user.name}`,
       { targetUserId: req.params.id }
     );
-    res.json({
-      message: user.isDisabled ? "User disabled" : "User enabled",
-      user: { _id: user._id, name: user.name, isDisabled: user.isDisabled },
-    });
-  } catch (err) {
+    res.json({ message: user.isDisabled ? "User disabled" : "User enabled", user: { _id: user._id, name: user.name, isDisabled: user.isDisabled } });
+  } catch {
     res.status(500).json({ message: "Error toggling user status" });
   }
 });
@@ -719,18 +707,18 @@ app.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
       return res.status(400).json({ message: "Cannot delete your own account" });
     const user = await User.findByIdAndDelete(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-    logActivity(req, "user_deleted",
-      `Deleted user: ${user.name} (${user.email})`,
+    logActivity(req, "user_deleted", `Deleted user: ${user.name} (${user.email})`,
       { deletedUserId: req.params.id, deletedEmail: user.email }
     );
     res.json({ message: "User deleted permanently" });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error deleting user" });
   }
 });
 
 // ─── APPOINTMENTS ─────────────────────────────────────────────────────────────
-app.post("/appointment", async (req, res) => {
+// Shared handler used by both POST /appointment and POST /appointments
+const handleBookAppointment = async (req, res) => {
   try {
     const { token, tokenStr, date } = await getNextToken("appointment");
     const isReception = String(req.body.source || "").toLowerCase() === "reception";
@@ -740,15 +728,16 @@ app.post("/appointment", async (req, res) => {
       problem:     String(req.body.problem || ""),
       contact:     String(req.body.contact || "").trim(),
       email:       String(req.body.email   || ""),
-      date:        req.body.date  || "",
-      time:        req.body.time  || "",
+      date:        req.body.date   || "",
+      time:        req.body.time   || "",
+      notes:       req.body.notes  || "",
       userId:      req.body.userId || null,
       source:      req.body.source || "online",
       status:      isReception ? "Confirmed" : "Pending",
       tokenNumber: token,
       tokenStr,
       tokenDate:   date,
-      bookedAt:    req.body.bookedAt ? new Date(req.body.bookedAt) : new Date(),
+      bookedAt:    new Date(),
     });
     await apt.save();
     ActivityLog.create({
@@ -757,7 +746,7 @@ app.post("/appointment", async (req, res) => {
       userRole:  isReception ? "reception" : "patient",
       userEmail: apt.email || "",
       action:    "appointment_booked",
-      description: `Appointment booked: ${apt.name} | Token: ${tokenStr} | Source: ${apt.source} | Status: ${apt.status}`,
+      description: `Appointment booked: ${apt.name} | Token: ${tokenStr} | Source: ${apt.source}`,
       meta: { tokenStr, status: apt.status, source: apt.source, appointmentId: apt._id },
       ip: req.headers["x-forwarded-for"] || req.ip || "",
     }).catch(() => {});
@@ -766,13 +755,16 @@ app.post("/appointment", async (req, res) => {
     console.error("Appointment error:", err);
     res.status(500).json({ message: "Error saving appointment" });
   }
-});
+};
+
+app.post("/appointment",  handleBookAppointment); // legacy route
+app.post("/appointments", handleBookAppointment); // new route used by Appointment.jsx
 
 app.get("/appointments", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const apts = await Appointment.find().sort({ bookedAt: -1 }).populate("userId", "name email phone");
     res.json(apts);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching appointments" });
   }
 });
@@ -782,7 +774,7 @@ app.get("/appointments/my", authenticateToken, async (req, res) => {
     const userId    = req.user.id;
     const user      = await User.findById(userId).select("phone");
     const userPhone = user?.phone ? String(user.phone).trim() : null;
-    const query     = {
+    const query = {
       $or: [
         { userId: new mongoose.Types.ObjectId(userId) },
         ...(userPhone ? [{ contact: userPhone }] : []),
@@ -790,12 +782,13 @@ app.get("/appointments/my", authenticateToken, async (req, res) => {
     };
     const apts = await Appointment.find(query).sort({ bookedAt: -1 });
     res.json(apts);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching appointments" });
   }
 });
 
-app.patch("/appointments/:id/status", authenticateToken, requireAdmin, async (req, res) => {
+// FIXED: requireAdmin → requireClinicStaff so reception/staff can update status
+app.patch("/appointments/:id/status", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const { status } = req.body;
     if (!["Pending", "Confirmed", "Completed", "Cancelled"].includes(status))
@@ -807,7 +800,7 @@ app.patch("/appointments/:id/status", authenticateToken, requireAdmin, async (re
       { appointmentId: req.params.id, newStatus: status, patientName: apt.name, tokenStr: apt.tokenStr }
     );
     res.json({ message: "Status updated", appointment: apt });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating appointment status" });
   }
 });
@@ -816,12 +809,9 @@ app.delete("/appointments/:id", authenticateToken, requireAdmin, async (req, res
   try {
     const apt = await Appointment.findByIdAndDelete(req.params.id);
     if (!apt) return res.status(404).json({ message: "Appointment not found" });
-    logActivity(req, "appointment_deleted",
-      `Deleted appointment for ${apt.name} (${apt.tokenStr})`,
-      { appointmentId: req.params.id }
-    );
+    logActivity(req, "appointment_deleted", `Deleted appointment for ${apt.name} (${apt.tokenStr})`, { appointmentId: req.params.id });
     res.json({ message: "Appointment deleted" });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error deleting appointment" });
   }
 });
@@ -836,7 +826,7 @@ app.get("/notice", async (req, res) => {
       return res.json(null);
     }
     res.json(notice);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching notice" });
   }
 });
@@ -848,10 +838,7 @@ app.post("/notice", authenticateToken, requireAdmin, async (req, res) => {
   let notice = await Notice.findOne();
   if (notice) { notice.message = message; notice.expiresAt = expiresAt; await notice.save(); }
   else { notice = new Notice({ message, expiresAt }); await notice.save(); }
-  logActivity(req, "notice_published",
-    `Published notice: "${message.slice(0, 60)}${message.length > 60 ? "..." : ""}"`,
-    { expiresAt }
-  );
+  logActivity(req, "notice_published", `Published notice: "${message.slice(0, 60)}${message.length > 60 ? "..." : ""}"`, { expiresAt });
   res.json({ message: "Notice updated" });
 });
 
@@ -866,7 +853,7 @@ app.get("/medicines", async (req, res) => {
   try {
     const medicines = await Medicine.find({ isActive: true }).sort({ createdAt: -1 });
     res.json(medicines);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching medicines" });
   }
 });
@@ -875,7 +862,7 @@ app.get("/medicines/all", authenticateToken, requireStaff, async (req, res) => {
   try {
     const medicines = await Medicine.find().sort({ createdAt: -1 });
     res.json(medicines);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching medicines" });
   }
 });
@@ -887,7 +874,7 @@ app.get("/medicines/low-stock", authenticateToken, requireAdmin, async (req, res
       $expr: { $lte: ["$stock", "$lowStockThreshold"] },
     });
     res.json(medicines);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching low stock" });
   }
 });
@@ -905,12 +892,9 @@ app.post("/medicines", authenticateToken, requireAdmin, async (req, res) => {
       isActive: true,
     });
     await medicine.save();
-    logActivity(req, "medicine_added",
-      `Added medicine: ${medicine.name} | Price: Rs.${medicine.price} | Stock: ${medicine.stock}`,
-      { medicineId: medicine._id, name: medicine.name }
-    );
+    logActivity(req, "medicine_added", `Added medicine: ${medicine.name} | Price: Rs.${medicine.price} | Stock: ${medicine.stock}`, { medicineId: medicine._id, name: medicine.name });
     res.status(201).json({ message: "Medicine added successfully", medicine });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error adding medicine" });
   }
 });
@@ -934,12 +918,9 @@ app.put("/medicines/:id", authenticateToken, requireAdmin, async (req, res) => {
       updatedAt: new Date(),
     }, { new: true });
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
-    logActivity(req, "medicine_updated",
-      `Updated medicine: ${medicine.name}`,
-      { medicineId: req.params.id, changes: Object.keys(req.body) }
-    );
+    logActivity(req, "medicine_updated", `Updated medicine: ${medicine.name}`, { medicineId: req.params.id, changes: Object.keys(req.body) });
     res.json({ message: "Medicine updated successfully", medicine });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating medicine" });
   }
 });
@@ -955,12 +936,11 @@ app.patch("/medicines/:id/stock", authenticateToken, requireAdmin, async (req, r
     else                               medicine.stock = Number(stock);
     medicine.updatedAt = new Date();
     await medicine.save();
-    logActivity(req, "medicine_stock_updated",
-      `Stock updated for ${medicine.name}: ${oldStock} → ${medicine.stock}`,
+    logActivity(req, "medicine_stock_updated", `Stock updated for ${medicine.name}: ${oldStock} → ${medicine.stock}`,
       { medicineId: req.params.id, name: medicine.name, operation, amount: stock, oldStock, newStock: medicine.stock }
     );
     res.json({ message: "Stock updated", medicine });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating stock" });
   }
 });
@@ -969,12 +949,9 @@ app.delete("/medicines/:id/permanent", authenticateToken, requireAdmin, async (r
   try {
     const medicine = await Medicine.findByIdAndDelete(req.params.id);
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
-    logActivity(req, "medicine_deleted",
-      `Permanently deleted medicine: ${medicine.name}`,
-      { medicineId: req.params.id, name: medicine.name, permanent: true }
-    );
+    logActivity(req, "medicine_deleted", `Permanently deleted medicine: ${medicine.name}`, { medicineId: req.params.id, name: medicine.name, permanent: true });
     res.json({ message: "Medicine permanently deleted" });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error deleting medicine" });
   }
 });
@@ -987,12 +964,9 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
       { new: true }
     );
     if (!medicine) return res.status(404).json({ message: "Medicine not found" });
-    logActivity(req, "medicine_deleted",
-      `Soft-deleted (hidden) medicine: ${medicine.name}`,
-      { medicineId: req.params.id, softDelete: true }
-    );
+    logActivity(req, "medicine_deleted", `Soft-deleted (hidden) medicine: ${medicine.name}`, { medicineId: req.params.id, softDelete: true });
     res.json({ message: "Medicine removed from store" });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error removing medicine" });
   }
 });
@@ -1012,16 +986,10 @@ app.post("/orders", authenticateToken, async (req, res) => {
     });
     await order.save();
     for (const item of items) {
-      await Medicine.findOneAndUpdate(
-        { name: item.name, isActive: true },
-        { $inc: { stock: -(item.quantity || 1) } }
-      );
+      await Medicine.findOneAndUpdate({ name: item.name, isActive: true }, { $inc: { stock: -(item.quantity || 1) } });
     }
     await order.populate("userId", "name email phone");
-    logActivity(req, "order_created",
-      `Online order by ${req.user.email} | Token: ${tokenStr} | Total: Rs.${total}`,
-      { orderId: order._id, tokenStr, total, itemCount: items.length }
-    );
+    logActivity(req, "order_created", `Online order by ${req.user.email} | Token: ${tokenStr} | Total: Rs.${total}`, { orderId: order._id, tokenStr, total, itemCount: items.length });
     res.status(201).json({ message: "Order placed successfully", order });
     sendOrderEmails({ order, userEmail: req.user.email, items, total, paymentMethod, tokenStr });
   } catch (err) {
@@ -1030,7 +998,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => { // ✅ FIX: staff can create walk-in orders
+app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => {
   try {
     const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
     if (!items || !items.length || !total)
@@ -1057,16 +1025,10 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
     });
     await order.save();
     for (const item of items) {
-      await Medicine.findOneAndUpdate(
-        { name: item.name, isActive: true },
-        { $inc: { stock: -(item.quantity || 1) } }
-      );
+      await Medicine.findOneAndUpdate({ name: item.name, isActive: true }, { $inc: { stock: -(item.quantity || 1) } });
     }
     if (userId) await order.populate("userId", "name email phone");
-    logActivity(req, "walkin_order_created",
-      `Walk-in order for ${guestName || "linked user"} | Token: ${tokenStr} | Rs.${total}`,
-      { orderId: order._id, tokenStr, total, customer: guestName }
-    );
+    logActivity(req, "walkin_order_created", `Walk-in order for ${guestName || "linked user"} | Token: ${tokenStr} | Rs.${total}`, { orderId: order._id, tokenStr, total, customer: guestName });
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
     console.error("Walk-in error:", err);
@@ -1074,15 +1036,12 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
   }
 });
 
-
 app.get("/orders", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const orders = await Order.find().populate("userId", "name email phone").sort({ createdAt: -1 });
-    if (!orders) return res.json([]); // Ensure always returning an array
     res.json(orders);
-  } catch (err) {
-    console.error("Orders Fetch Error:", err);
-    res.status(500).json({ message: "Internal Server Error", error: err.message });
+  } catch {
+    res.status(500).json({ message: "Error fetching orders" });
   }
 });
 
@@ -1091,7 +1050,7 @@ app.get("/orders/my", authenticateToken, async (req, res) => {
     const userId = new mongoose.Types.ObjectId(req.user.id);
     const orders = await Order.find({ userId }).sort({ createdAt: -1 });
     res.json(orders);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching your orders" });
   }
 });
@@ -1104,12 +1063,9 @@ app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res
       return res.status(400).json({ message: "Invalid status value" });
     const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate("userId", "name email phone");
     if (!order) return res.status(404).json({ message: "Order not found" });
-    logActivity(req, "order_status_changed",
-      `Order #${order._id.toString().slice(-6).toUpperCase()} → ${status}`,
-      { orderId: req.params.id, newStatus: status }
-    );
+    logActivity(req, "order_status_changed", `Order #${order._id.toString().slice(-6).toUpperCase()} → ${status}`, { orderId: req.params.id, newStatus: status });
     res.json({ message: "Status updated successfully", order });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating order status" });
   }
 });
@@ -1118,7 +1074,7 @@ app.get("/staff/orders", authenticateToken, requireStaff, async (req, res) => {
   try {
     const orders = await Order.find().populate("userId", "name email phone").sort({ createdAt: -1 }).limit(200);
     res.json(orders);
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error fetching orders" });
   }
 });
@@ -1130,12 +1086,9 @@ app.patch("/staff/orders/:id/status", authenticateToken, requireStaff, async (re
       return res.status(403).json({ message: "Staff can only set Approved or Completed" });
     const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate("userId", "name email phone");
     if (!order) return res.status(404).json({ message: "Order not found" });
-    logActivity(req, "order_status_changed",
-      `Staff ${req.user.email} changed order #${order._id.toString().slice(-6).toUpperCase()} → ${status}`,
-      { orderId: req.params.id, newStatus: status, changedBy: req.user.email }
-    );
+    logActivity(req, "order_status_changed", `Staff ${req.user.email} changed order #${order._id.toString().slice(-6).toUpperCase()} → ${status}`, { orderId: req.params.id, newStatus: status, changedBy: req.user.email });
     res.json({ message: "Status updated", order });
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Error updating order status" });
   }
 });
@@ -1179,11 +1132,7 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
       const from = new Date(day); from.setHours(0, 0, 0, 0);
       const to   = new Date(day); to.setHours(23, 59, 59, 999);
       const s    = statsFor(allOrders, from, to);
-      dailyChart.push({
-        date: day.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
-        revenue: s.revenue,
-        orders:  s.orders,
-      });
+      dailyChart.push({ date: day.toLocaleDateString("en-IN", { day: "numeric", month: "short" }), revenue: s.revenue, orders: s.orders });
     }
 
     const [aptTokens, orderTokens, walkinTokens] = await Promise.all([
@@ -1192,9 +1141,7 @@ app.get("/analytics/sales", authenticateToken, requireAdmin, async (req, res) =>
       getTodayTokenCount("walkin"),
     ]);
 
-    const todayOrders = allOrders.filter(o =>
-      new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd
-    );
+    const todayOrders = allOrders.filter(o => new Date(o.createdAt) >= todayStart && new Date(o.createdAt) <= todayEnd);
 
     res.json({
       today:        { ...statsFor(allOrders, todayStart, todayEnd), topMedicines: topMedsFrom(todayOrders) },
