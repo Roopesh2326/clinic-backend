@@ -45,16 +45,29 @@ const ALLOWED_ORIGINS = [
 
 // ✅ FIX: Allow all origins — works with any frontend URL on Render/Vercel
 const corsOptions = {
-  origin: true,
+  origin: [
+    "https://clinic-frontend-rho.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+  ],
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
+  exposedHeaders: ["set-cookie"],
 };
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: corsOptions,
+  cors: {
+    origin: [
+      "https://clinic-frontend-rho.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:5173",
+    ],
+    credentials: true,
+    methods: ["GET", "POST"],
+  },
 });
-io.on("connection",  (socket) => console.log(`[Socket] connected: ${socket.id}`));
-io.on("disconnect",  (socket) => console.log(`[Socket] disconnected: ${socket.id}`));
 
 // ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
 app.use(helmet());
@@ -140,6 +153,8 @@ const logActivity = (req, action, description, meta = {}) => {
 // ─── HEALTH + KEEP-ALIVE ──────────────────────────────────────────────────────
 app.get("/",     (req, res) => res.json({ status: "ok", ts: Date.now() }));
 app.get("/ping", (req, res) => res.json({ pong: true, ts: Date.now() }));
+
+app.options("*", cors(corsOptions));
 
 // ─── NODEMAILER ───────────────────────────────────────────────────────────────
 require("dns").setDefaultResultOrder("ipv4first");
@@ -496,6 +511,7 @@ app.post("/login", loginLimiter, async (req, res) => {
       httpOnly: true,
       secure: true,
       sameSite: "None",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
     ActivityLog.create({
       userId: user._id, userName: user.name, userRole: user.role, userEmail: user.email,
