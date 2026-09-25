@@ -304,6 +304,17 @@ const ensureQueueState = async (type, date = getTodayIST()) => {
   return state;
 };
 
+const getQueueWaiting = async (type, date, currentServing) => {
+  if (type === "appointment") {
+    return Appointment.countDocuments({
+      tokenDate: date,
+      tokenNumber: { $gt: currentServing },
+      status: { $in: ["Confirmed", "Pending"] },
+    });
+  }
+  return null;
+};
+
 // ─── QUEUE ROUTES ─────────────────────────────────────────────────────────────
 app.get("/queue/status", async (req, res) => {
   try {
@@ -323,11 +334,12 @@ app.get("/queue/status", async (req, res) => {
       await state.save();
     }
 
+    const actualWaiting = await getQueueWaiting(type, today, currentServing);
     res.json({
       type,
       currentServing,
       totalIssued,
-      waiting: Math.max(0, totalIssued - currentServing),
+      waiting: actualWaiting === null ? Math.max(0, totalIssued - currentServing) : actualWaiting,
       nextToken: currentServing < totalIssued ? currentServing + 1 : null,
       lastUpdated: state.lastUpdated,
     });
@@ -348,17 +360,30 @@ app.get("/queue", async (req, res) => {
       const totalIssued = await getTodayTokenCount(type, today);
       const serving = Math.min(state.currentServing || 0, totalIssued);
       const prefix = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
-      const next = [];
+      let next = [];
 
-      for (let i = serving + 1; i <= Math.min(serving + 5, totalIssued); i++) {
-        next.push({ number: i, tokenStr: prefix + "-" + String(i).padStart(3, "0") });
+      if (type === "appointment") {
+        const upcoming = await Appointment.find({
+          tokenDate: today,
+          tokenNumber: { $gt: serving },
+          status: { $in: ["Confirmed", "Pending"] },
+        })
+          .sort({ tokenNumber: 1, _id: 1 })
+          .limit(5)
+          .select("tokenNumber tokenStr");
+        next = upcoming.map(a => ({ number: a.tokenNumber, tokenStr: a.tokenStr }));
+      } else {
+        for (let i = serving + 1; i <= Math.min(serving + 5, totalIssued); i++) {
+          next.push({ number: i, tokenStr: prefix + "-" + String(i).padStart(3, "0") });
+        }
       }
 
+      const actualWaiting = await getQueueWaiting(type, today, serving);
       result[type] = {
         current: serving > 0 ? { number: serving, tokenStr: prefix + "-" + String(serving).padStart(3, "0") } : null,
         next,
         totalIssued,
-        waiting: Math.max(0, totalIssued - serving),
+        waiting: actualWaiting === null ? Math.max(0, totalIssued - serving) : actualWaiting,
         lastUpdated: state.lastUpdated,
       };
     }));
