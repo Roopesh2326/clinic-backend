@@ -1364,7 +1364,7 @@ app.patch("/orders/:id/status", authenticateToken, requireAdmin, async (req, res
 
 app.get("/staff/orders", authenticateToken, requireStaff, async (req, res) => {
   try {
-    const orders = await Order.find().populate("userId", "name email phone").sort({ createdAt: -1 }).limit(200);
+    const orders = await Order.find()\n      .select("userId guestInfo orderType items total paymentMethod status tokenNumber tokenStr tokenDate createdAt")\n      .populate("userId", "name email phone")\n      .sort({ createdAt: -1 })\n      .limit(200)\n      .lean();
     res.json(orders);
   } catch {
     res.status(500).json({ message: "Error fetching orders" });
