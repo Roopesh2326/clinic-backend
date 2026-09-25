@@ -31,8 +31,13 @@ const getTodayDate = () => {
  *   ❌ in-memory counter                         (resets on restart!)
  *   ✅ findOneAndUpdate $inc                     (atomic, production-safe)
  */
-const getNextToken = async (type = "appointment") => {
-  const date = getTodayDate();
+const normalizeTokenDate = (value) => {
+  const date = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : getTodayDate();
+};
+
+const getNextToken = async (type = "appointment", requestedDate = getTodayDate()) => {
+  const date = normalizeTokenDate(requestedDate);
   const key = type + ":" + date;
 
   // ── THE CORE: atomic findOneAndUpdate ────────────────────────────────────
@@ -74,8 +79,8 @@ const getNextToken = async (type = "appointment") => {
  * Returns how many tokens have been issued today for a given type.
  * Useful for admin dashboard to show "15 appointments today"
  */
-const getTodayTokenCount = async (type = "appointment") => {
-  const date = getTodayDate();
+const getTodayTokenCount = async (type = "appointment", requestedDate = getTodayDate()) => {
+  const date = normalizeTokenDate(requestedDate);
   const key = type + ":" + date;
   const counter = await Counter.findOne({ key });
   return counter ? counter.seq : 0;
@@ -97,4 +102,5 @@ module.exports = {
   getTodayTokenCount,
   resetToken,
   getTodayDate,
+  normalizeTokenDate,
 };
