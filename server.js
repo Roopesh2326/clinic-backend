@@ -972,40 +972,132 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
 });
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
-app.post("/orders", authenticateToken, async (req, res) => {
+// Build an order from current database prices and reserve stock atomically.
+// The client may send display fields, but never gets to choose the final total.
+const prepareOrderItems = async (items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw Object.assign(new Error("At least one item is required"), { statusCode: 400 });
+  }
+
+  const prepared = [];
+  const reserved = [];
+
   try {
-    const { items, total, paymentMethod } = req.body;
-    if (!items || !items.length || !total)
-      return res.status(400).json({ message: "Missing items or total" });
+    for (const raw of items) {
+      const quantity = Number(raw.quantity || 1);
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+        throw Object.assign(new Error("Invalid item quantity"), { statusCode: 400 });
+      }
+
+      const medicineQuery = raw._id
+        ? { _id: raw._id, isActive: true, stock: { $gte: quantity } }
+        : { name: String(raw.name || "").trim(), isActive: true, stock: { $gte: quantity } };
+
+      const medicine = await Medicine.findOneAndUpdate(
+        medicineQuery,
+        { $inc: { stock: -quantity }, $set: { updatedAt: new Date() } },
+        { new: true }
+      );
+
+      if (!medicine) {
+        throw Object.assign(
+          new Error(`Insufficient stock or medicine unavailable: ${raw.name || "item"}`),
+          { statusCode: 409 }
+        );
+      }
+
+      const snapshot = {
+        _id: medicine._id,
+        name: medicine.name,
+        price: Number(medicine.price),
+        img: medicine.img || "",
+        unit: medicine.unit || "units",
+        quantity,
+      };
+      prepared.push(snapshot);
+      reserved.push({ id: medicine._id, quantity });
+    }
+
+    const total = prepared.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    if (!Number.isFinite(total) || total <= 0) {
+      throw Object.assign(new Error("Invalid order total"), { statusCode: 400 });
+    }
+
+    return { items: prepared, total, reserved };
+  } catch (err) {
+    for (const item of reserved) {
+      await Medicine.updateOne(
+        { _id: item.id },
+        { $inc: { stock: item.quantity }, $set: { updatedAt: new Date() } }
+      );
+    }
+    throw err;
+  }
+};
+
+app.post("/orders", authenticateToken, async (req, res) => {
+  let reserved = [];
+  try {
+    const { paymentMethod } = req.body;
+    if (paymentMethod && !["cash", "upi", "card"].includes(paymentMethod)) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
+
+    const prepared = await prepareOrderItems(req.body.items);
+    reserved = prepared.reserved;
+
     const { token, tokenStr, date } = await getNextToken("order");
     const order = new Order({
-      userId: req.user.id, orderType: "online",
-      items, total: Number(total),
+      userId: req.user.id,
+      orderType: "online",
+      items: prepared.items,
+      total: prepared.total,
       paymentMethod: paymentMethod || "cash",
-      status: "Pending", tokenNumber: token, tokenStr, tokenDate: date,
+      status: "Pending",
+      tokenNumber: token,
+      tokenStr,
+      tokenDate: date,
     });
+
     await order.save();
-    for (const item of items) {
-      await Medicine.findOneAndUpdate({ name: item.name, isActive: true }, { $inc: { stock: -(item.quantity || 1) } });
-    }
     await order.populate("userId", "name email phone");
-    logActivity(req, "order_created", `Online order by ${req.user.email} | Token: ${tokenStr} | Total: Rs.${total}`, { orderId: order._id, tokenStr, total, itemCount: items.length });
+
+    logActivity(
+      req,
+      "order_created",
+      `Online order by ${req.user.email} | Token: ${tokenStr} | Total: Rs.${prepared.total}`,
+      { orderId: order._id, tokenStr, total: prepared.total, itemCount: prepared.items.length }
+    );
+
     res.status(201).json({ message: "Order placed successfully", order });
-    sendOrderEmails({ order, userEmail: req.user.email, items, total, paymentMethod, tokenStr });
+    sendOrderEmails({
+      order,
+      userEmail: req.user.email,
+      items: prepared.items,
+      total: prepared.total,
+      paymentMethod: paymentMethod || "cash",
+      tokenStr,
+    });
   } catch (err) {
     console.error("Order error:", err);
-    res.status(500).json({ message: "Error saving order. Please try again." });
+    res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Error saving order. Please try again.",
+    });
   }
 });
 
 app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => {
   try {
-    const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
-    if (!items || !items.length || !total)
-      return res.status(400).json({ message: "Missing items or total" });
+    const { paymentMethod, guestName, guestPhone, existingUserId } = req.body;
+    if (paymentMethod && !["cash", "upi", "card"].includes(paymentMethod)) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
     if (!guestName && !existingUserId)
       return res.status(400).json({ message: "Customer name is required" });
+
+    const prepared = await prepareOrderItems(req.body.items);
     const { token, tokenStr, date } = await getNextToken("walkin");
+
     let userId = null;
     let guestInfo = { name: "", phone: "" };
     if (existingUserId) {
@@ -1017,22 +1109,36 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
       }
       guestInfo = { name: guestName || "", phone: guestPhone || "" };
     }
+
     const order = new Order({
-      userId, guestInfo, orderType: "walk-in",
-      items, total: Number(total),
+      userId,
+      guestInfo,
+      orderType: "walk-in",
+      items: prepared.items,
+      total: prepared.total,
       paymentMethod: paymentMethod || "cash",
-      status: "Completed", tokenNumber: token, tokenStr, tokenDate: date,
+      status: "Completed",
+      tokenNumber: token,
+      tokenStr,
+      tokenDate: date,
     });
+
     await order.save();
-    for (const item of items) {
-      await Medicine.findOneAndUpdate({ name: item.name, isActive: true }, { $inc: { stock: -(item.quantity || 1) } });
-    }
     if (userId) await order.populate("userId", "name email phone");
-    logActivity(req, "walkin_order_created", `Walk-in order for ${guestName || "linked user"} | Token: ${tokenStr} | Rs.${total}`, { orderId: order._id, tokenStr, total, customer: guestName });
+
+    logActivity(
+      req,
+      "walkin_order_created",
+      `Walk-in order for ${guestName || "linked user"} | Token: ${tokenStr} | Rs.${prepared.total}`,
+      { orderId: order._id, tokenStr, total: prepared.total, customer: guestName }
+    );
+
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
     console.error("Walk-in error:", err);
-    res.status(500).json({ message: "Error creating walk-in order" });
+    res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Error creating walk-in order",
+    });
   }
 });
 
