@@ -7,7 +7,13 @@ const queueStateSchema = new mongoose.Schema({
     enum: ["appointment", "order", "walkin"],
     unique: true,
   },
-  currentServing: { type: Number, default: 0 },
+  // IST date for which currentServing applies. This prevents yesterday's
+  // pointer from leaking into a new day's queue.
+  queueDate: {
+    type: String,
+    default: "",
+  },
+  currentServing: { type: Number, default: 0, min: 0 },
   lastUpdated: { type: Date, default: Date.now },
 });
 

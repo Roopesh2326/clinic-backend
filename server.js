@@ -38,7 +38,8 @@ const corsOptions = {
     "http://localhost:5173",
     process.env.FRONTEND_URL,
   ].filter(Boolean),
-  };
+  credentials: true,
+};
 
 // ─── SOCKET.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, { cors: corsOptions });
@@ -128,7 +129,10 @@ app.use(generalLimiter);
 // ─── MONGODB ──────────────────────────────────────────────────────────────────
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => console.log("MongoDB connected"))
+  .then(async () => {
+    await Counter.syncIndexes();
+    console.log("MongoDB connected");
+  })
   .catch((err) => { console.error("MongoDB connection failed:", err); process.exit(1); });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
@@ -263,9 +267,14 @@ const sendOrderEmails = async ({ order, userEmail, items, total, paymentMethod, 
 const getTodayIST = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 
-const getNextToken = async (type = "order") => {
-  const date = getTodayIST();
-  const key  = `${type}:${date}`;
+const normalizeQueueDate = (value) => {
+  const date = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : getTodayIST();
+};
+
+const getNextToken = async (type = "order", requestedDate = getTodayIST()) => {
+  const date = normalizeQueueDate(requestedDate);
+  const key  = type + ":" + date;
   const counter = await Counter.findOneAndUpdate(
     { key },
     { $inc: { seq: 1 }, $setOnInsert: { date, createdAt: new Date() } },
@@ -273,12 +282,26 @@ const getNextToken = async (type = "order") => {
   );
   const num    = counter.seq;
   const prefix = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
-  return { token: num, tokenStr: `${prefix}-${String(num).padStart(3, "0")}`, date };
+  return { token: num, tokenStr: prefix + "-" + String(num).padStart(3, "0"), date };
 };
 
-const getTodayTokenCount = async (type) => {
-  const counter = await Counter.findOne({ key: `${type}:${getTodayIST()}` });
+const getTodayTokenCount = async (type, date = getTodayIST()) => {
+  const normalizedDate = normalizeQueueDate(date);
+  const counter = await Counter.findOne({ key: type + ":" + normalizedDate });
   return counter ? counter.seq : 0;
+};
+
+const ensureQueueState = async (type, date = getTodayIST()) => {
+  const queueDate = normalizeQueueDate(date);
+  let state = await QueueState.findOne({ type });
+  if (!state || state.queueDate !== queueDate) {
+    state = await QueueState.findOneAndUpdate(
+      { type },
+      { $set: { queueDate, currentServing: 0, lastUpdated: new Date() } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  }
+  return state;
 };
 
 // ─── QUEUE ROUTES ─────────────────────────────────────────────────────────────
@@ -287,11 +310,29 @@ app.get("/queue/status", async (req, res) => {
     const type = req.query.type || "appointment";
     if (!["appointment", "order", "walkin"].includes(type))
       return res.status(400).json({ message: "Invalid type" });
-    let state = await QueueState.findOne({ type });
-    if (!state) state = await QueueState.create({ type, currentServing: 0 });
-    const totalIssued = await getTodayTokenCount(type);
-    res.json({ type, currentServing: state.currentServing, totalIssued, nextToken: totalIssued + 1, lastUpdated: state.lastUpdated });
-  } catch {
+
+    const today = getTodayIST();
+    const state = await ensureQueueState(type, today);
+    const totalIssued = await getTodayTokenCount(type, today);
+    const currentServing = Math.min(state.currentServing || 0, totalIssued);
+
+    if (currentServing !== state.currentServing) {
+      state.currentServing = currentServing;
+      state.queueDate = today;
+      state.lastUpdated = new Date();
+      await state.save();
+    }
+
+    res.json({
+      type,
+      currentServing,
+      totalIssued,
+      waiting: Math.max(0, totalIssued - currentServing),
+      nextToken: currentServing < totalIssued ? currentServing + 1 : null,
+      lastUpdated: state.lastUpdated,
+    });
+  } catch (err) {
+    console.error("[Queue] status error:", err);
     res.status(500).json({ message: "Error fetching queue status" });
   }
 });
@@ -299,22 +340,29 @@ app.get("/queue/status", async (req, res) => {
 app.get("/queue", async (req, res) => {
   try {
     const types = ["appointment", "order", "walkin"];
+    const today = getTodayIST();
     const result = {};
+
     await Promise.all(types.map(async (type) => {
-      let state = await QueueState.findOne({ type });
-      if (!state) state = { currentServing: 0, lastUpdated: new Date() };
-      const totalIssued = await getTodayTokenCount(type);
-      const serving = state.currentServing || 0;
+      const state = await ensureQueueState(type, today);
+      const totalIssued = await getTodayTokenCount(type, today);
+      const serving = Math.min(state.currentServing || 0, totalIssued);
       const prefix = type === "appointment" ? "APT" : type === "walkin" ? "WLK" : "ORD";
       const next = [];
+
       for (let i = serving + 1; i <= Math.min(serving + 5, totalIssued); i++) {
-        next.push({ number: i, tokenStr: `${prefix}-${String(i).padStart(3, "0")}` });
+        next.push({ number: i, tokenStr: prefix + "-" + String(i).padStart(3, "0") });
       }
+
       result[type] = {
-        current: serving > 0 ? { number: serving, tokenStr: `${prefix}-${String(serving).padStart(3, "0")}` } : null,
-        next, totalIssued, lastUpdated: state.lastUpdated,
+        current: serving > 0 ? { number: serving, tokenStr: prefix + "-" + String(serving).padStart(3, "0") } : null,
+        next,
+        totalIssued,
+        waiting: Math.max(0, totalIssued - serving),
+        lastUpdated: state.lastUpdated,
       };
     }));
+
     res.json(result);
   } catch (err) {
     console.error("[Queue Display]", err);
@@ -322,39 +370,47 @@ app.get("/queue", async (req, res) => {
   }
 });
 
-// Public queue display (protected by display key OR logged-in user)
+// Public queue display data contains token information only.
 app.get("/appointments/today", async (req, res) => {
   try {
     const displayKey = req.headers["x-display-key"];
     const cookieAuth = req.cookies.token;
     if (!cookieAuth && displayKey !== process.env.DISPLAY_KEY)
       return res.status(401).json({ message: "Unauthorized" });
+
     const today = getTodayIST();
     const apts = await Appointment.find({ tokenDate: today, status: { $ne: "Cancelled" } })
       .sort({ tokenNumber: 1 })
-      .select("name tokenStr tokenNumber tokenDate status contact bookedAt source");
+      .select("tokenStr tokenNumber tokenDate status");
     res.json(apts);
   } catch {
     res.status(500).json({ message: "Error fetching today queue" });
   }
 });
 
-app.get("/queue/today", authenticateToken, async (req, res) => {
+app.get("/queue/today", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
-    const start = new Date(); start.setHours(0, 0, 0, 0);
-    const end   = new Date(); end.setHours(23, 59, 59, 999);
+    const today = getTodayIST();
+    const state = await ensureQueueState("appointment", today);
+    const totalIssued = await getTodayTokenCount("appointment", today);
     const todayApts = await Appointment.find({
-      bookedAt: { $gte: start, $lte: end },
+      tokenDate: today,
       status: { $ne: "Cancelled" },
     }).sort({ tokenNumber: 1 });
-    const serving = todayApts.find(a => a.status === "Confirmed") || todayApts.find(a => a.status === "Pending");
-    const waiting = todayApts.filter(a => a !== serving && ["Pending", "Confirmed"].includes(a.status));
+
+    const servingToken = Math.min(state.currentServing || 0, totalIssued);
+    const serving = todayApts.find(a => Number(a.tokenNumber) === servingToken) || null;
+    const waiting = todayApts.filter(a =>
+      Number(a.tokenNumber) > servingToken &&
+      ["Pending", "Confirmed"].includes(a.status)
+    );
+
     res.json({
-      date: getTodayIST(),
+      date: today,
       total: todayApts.length,
       done: todayApts.filter(a => a.status === "Completed").length,
       waiting: waiting.length,
-      serving: serving || null,
+      serving,
       queue: waiting.slice(0, 10),
       allTokens: todayApts,
     });
@@ -363,65 +419,128 @@ app.get("/queue/today", authenticateToken, async (req, res) => {
   }
 });
 
-// FIXED: requireAdmin → requireClinicStaff so reception can also advance queue
 app.post("/queue/next", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
     if (!["appointment", "order", "walkin"].includes(type))
       return res.status(400).json({ message: "Invalid type" });
+
     const today = getTodayIST();
+    const state = await ensureQueueState(type, today);
+    const totalIssued = await getTodayTokenCount(type, today);
+    const currentServing = Math.min(state.currentServing || 0, totalIssued);
+
+    if (currentServing >= totalIssued) {
+      return res.status(409).json({
+        message: "No waiting tokens in this queue",
+        type,
+        currentServing,
+        totalIssued,
+      });
+    }
+
+    let servedToken = currentServing + 1;
+
     if (type === "appointment") {
-      const serving = await Appointment.findOne({
-        tokenDate: today,
-        status: { $in: ["Confirmed", "Pending"] },
-      }).sort({ tokenNumber: 1 });
-      if (serving) {
-        serving.status = "Completed";
-        await serving.save();
-        logActivity(req, "queue_next",
-          `Auto-completed ${serving.tokenStr} for ${serving.name}`,
-          { type, tokenStr: serving.tokenStr, patientName: serving.name, appointmentId: serving._id }
+      // Atomically claim the next eligible appointment. Cancelled/completed
+      // appointments are skipped so one skipped token cannot block the queue.
+      const servedEntity = await Appointment.findOneAndUpdate(
+        {
+          tokenDate: today,
+          tokenNumber: { $gt: currentServing },
+          status: { $in: ["Confirmed", "Pending"] },
+        },
+        { $set: { status: "Completed" } },
+        { sort: { tokenNumber: 1, _id: 1 }, new: true }
+      );
+
+      if (servedEntity) {
+        servedToken = Number(servedEntity.tokenNumber);
+        logActivity(
+          req,
+          "queue_next",
+          "Completed " + servedEntity.tokenStr + " for " + servedEntity.name,
+          {
+            type,
+            tokenStr: servedEntity.tokenStr,
+            patientName: servedEntity.name,
+            appointmentId: servedEntity._id,
+          }
         );
       } else {
-        logActivity(req, "queue_next", `Advanced ${type} queue (no active appointment)`, { type });
+        // If the remaining issued tokens have no eligible appointment (for
+        // example, all were cancelled), move the pointer to the last token.
+        servedToken = totalIssued;
+        logActivity(req, "queue_next", "Skipped inactive appointment tokens", { type, totalIssued });
       }
     } else {
-      logActivity(req, "queue_next", `Advanced ${type} queue`, { type });
+      // Order/walk-in remain token-pointer queues; their existing order
+      // status workflows are not changed by pressing Next.
+      logActivity(req, "queue_next", "Advanced " + type + " queue", { type, tokenNumber: servedToken });
     }
-    const totalIssued = await getTodayTokenCount(type);
-    const state = await QueueState.findOneAndUpdate(
+
+    const updatedState = await QueueState.findOneAndUpdate(
       { type },
-      { $inc: { currentServing: 1 }, $set: { lastUpdated: new Date() } },
-      { upsert: true, new: true }
+      {
+        $max: { currentServing: servedToken },
+        $set: { queueDate: today, lastUpdated: new Date() },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
     );
-    if (state.currentServing > totalIssued && totalIssued > 0) {
-      await QueueState.updateOne({ type }, { $set: { currentServing: totalIssued } });
-      state.currentServing = totalIssued;
-    }
-    io.emit("queue:update", { type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
-    res.json({ message: `Now serving ${type} #${state.currentServing}`, type, currentServing: state.currentServing, totalIssued, lastUpdated: state.lastUpdated });
+
+    const finalServing = Math.min(updatedState.currentServing || 0, totalIssued);
+    const payload = {
+      message: "Now serving " + type + " #" + finalServing,
+      type,
+      currentServing: finalServing,
+      totalIssued,
+      waiting: Math.max(0, totalIssued - finalServing),
+      lastUpdated: updatedState.lastUpdated,
+    };
+
+    io.emit("queue:update", payload);
+    res.json(payload);
   } catch (err) {
     console.error("[Queue] next error:", err);
     res.status(500).json({ message: "Error advancing queue" });
   }
 });
 
-// FIXED: requireAdmin → requireClinicStaff
 app.post("/queue/reset", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const type = req.body.type || "appointment";
     if (!["appointment", "order", "walkin"].includes(type))
       return res.status(400).json({ message: "Invalid type" });
-    await QueueState.findOneAndUpdate(
+
+    const today = getTodayIST();
+    const totalIssued = await getTodayTokenCount(type, today);
+    const state = await QueueState.findOneAndUpdate(
       { type },
-      { $set: { currentServing: 0, lastUpdated: new Date() } },
-      { upsert: true, new: true }
+      {
+        $set: {
+          queueDate: today,
+          // Reset must never move backwards after tokens have been issued,
+          // otherwise the next click could serve duplicate token numbers.
+          currentServing: totalIssued,
+          lastUpdated: new Date(),
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    io.emit("queue:update", { type, currentServing: 0, totalIssued: 0, lastUpdated: new Date() });
-    logActivity(req, "queue_reset", `Reset ${type} queue to 0`, { type });
-    res.json({ message: `${type} queue reset to 0` });
+
+    const payload = {
+      type,
+      currentServing: totalIssued,
+      totalIssued,
+      waiting: 0,
+      lastUpdated: state.lastUpdated,
+    };
+
+    io.emit("queue:update", payload);
+    logActivity(req, "queue_reset", "Cleared remaining " + type + " queue", { type, totalIssued });
+    res.json({ message: type + " queue cleared for today", ...payload });
   } catch {
-    res.status(500).json({ message: "Error resetting queue" });
+    res.status(500).json({ message: "Error clearing queue" });
   }
 });
 
@@ -719,7 +838,8 @@ app.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
 // Shared handler used by both POST /appointment and POST /appointments
 const handleBookAppointment = async (req, res) => {
   try {
-    const { token, tokenStr, date } = await getNextToken("appointment");
+    const appointmentDate = normalizeQueueDate(req.body.date);
+    const { token, tokenStr, date } = await getNextToken("appointment", appointmentDate);
     const isReception = String(req.body.source || "").toLowerCase() === "reception";
     const apt = new Appointment({
       name:        String(req.body.name    || "").trim(),
@@ -759,7 +879,7 @@ const handleBookAppointment = async (req, res) => {
 app.post("/appointment",  handleBookAppointment); // legacy route
 app.post("/appointments", handleBookAppointment); // new route used by Appointment.jsx
 
-app.get("/appointments", authenticateToken, requireAdmin, async (req, res) => {
+app.get("/appointments", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const apts = await Appointment.find().sort({ bookedAt: -1 }).populate("userId", "name email phone");
     res.json(apts);
@@ -971,40 +1091,140 @@ app.delete("/medicines/:id", authenticateToken, requireAdmin, async (req, res) =
 });
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
-app.post("/orders", authenticateToken, async (req, res) => {
+// Build an order from current database prices and reserve stock atomically.
+// The client may send display fields, but never gets to choose the final total.
+const prepareOrderItems = async (items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw Object.assign(new Error("At least one item is required"), { statusCode: 400 });
+  }
+
+  const prepared = [];
+  const reserved = [];
+
   try {
-    const { items, total, paymentMethod } = req.body;
-    if (!items || !items.length || !total)
-      return res.status(400).json({ message: "Missing items or total" });
+    for (const raw of items) {
+      const quantity = Number(raw.quantity || 1);
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+        throw Object.assign(new Error("Invalid item quantity"), { statusCode: 400 });
+      }
+
+      const medicineQuery = raw._id
+        ? { _id: raw._id, isActive: true, stock: { $gte: quantity } }
+        : { name: String(raw.name || "").trim(), isActive: true, stock: { $gte: quantity } };
+
+      const medicine = await Medicine.findOneAndUpdate(
+        medicineQuery,
+        { $inc: { stock: -quantity }, $set: { updatedAt: new Date() } },
+        { new: true }
+      );
+
+      if (!medicine) {
+        throw Object.assign(
+          new Error(`Insufficient stock or medicine unavailable: ${raw.name || "item"}`),
+          { statusCode: 409 }
+        );
+      }
+
+      const snapshot = {
+        _id: medicine._id,
+        name: medicine.name,
+        price: Number(medicine.price),
+        img: medicine.img || "",
+        unit: medicine.unit || "units",
+        quantity,
+      };
+      prepared.push(snapshot);
+      reserved.push({ id: medicine._id, quantity });
+    }
+
+    const total = prepared.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    if (!Number.isFinite(total) || total <= 0) {
+      throw Object.assign(new Error("Invalid order total"), { statusCode: 400 });
+    }
+
+    return { items: prepared, total, reserved };
+  } catch (err) {
+    for (const item of reserved) {
+      await Medicine.updateOne(
+        { _id: item.id },
+        { $inc: { stock: item.quantity }, $set: { updatedAt: new Date() } }
+      );
+    }
+    throw err;
+  }
+};
+
+app.post("/orders", authenticateToken, async (req, res) => {
+  let reserved = [];
+  try {
+    const { paymentMethod } = req.body;
+    if (paymentMethod && !["cash", "upi", "card"].includes(paymentMethod)) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
+
+    const prepared = await prepareOrderItems(req.body.items);
+    reserved = prepared.reserved;
+
     const { token, tokenStr, date } = await getNextToken("order");
     const order = new Order({
-      userId: req.user.id, orderType: "online",
-      items, total: Number(total),
+      userId: req.user.id,
+      orderType: "online",
+      items: prepared.items,
+      total: prepared.total,
       paymentMethod: paymentMethod || "cash",
-      status: "Pending", tokenNumber: token, tokenStr, tokenDate: date,
+      status: "Pending",
+      tokenNumber: token,
+      tokenStr,
+      tokenDate: date,
     });
+
     await order.save();
-    for (const item of items) {
-      await Medicine.findOneAndUpdate({ name: item.name, isActive: true }, { $inc: { stock: -(item.quantity || 1) } });
-    }
     await order.populate("userId", "name email phone");
-    logActivity(req, "order_created", `Online order by ${req.user.email} | Token: ${tokenStr} | Total: Rs.${total}`, { orderId: order._id, tokenStr, total, itemCount: items.length });
+
+    logActivity(
+      req,
+      "order_created",
+      `Online order by ${req.user.email} | Token: ${tokenStr} | Total: Rs.${prepared.total}`,
+      { orderId: order._id, tokenStr, total: prepared.total, itemCount: prepared.items.length }
+    );
+
     res.status(201).json({ message: "Order placed successfully", order });
-    sendOrderEmails({ order, userEmail: req.user.email, items, total, paymentMethod, tokenStr });
+    sendOrderEmails({
+      order,
+      userEmail: req.user.email,
+      items: prepared.items,
+      total: prepared.total,
+      paymentMethod: paymentMethod || "cash",
+      tokenStr,
+    });
   } catch (err) {
+    for (const item of reserved) {
+      await Medicine.updateOne(
+        { _id: item.id },
+        { $inc: { stock: item.quantity }, $set: { updatedAt: new Date() } }
+      );
+    }
     console.error("Order error:", err);
-    res.status(500).json({ message: "Error saving order. Please try again." });
+    res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Error saving order. Please try again.",
+    });
   }
 });
 
 app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => {
+  let reserved = [];
   try {
-    const { items, total, paymentMethod, guestName, guestPhone, existingUserId } = req.body;
-    if (!items || !items.length || !total)
-      return res.status(400).json({ message: "Missing items or total" });
+    const { paymentMethod, guestName, guestPhone, existingUserId } = req.body;
+    if (paymentMethod && !["cash", "upi", "card"].includes(paymentMethod)) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
     if (!guestName && !existingUserId)
       return res.status(400).json({ message: "Customer name is required" });
+
+    const prepared = await prepareOrderItems(req.body.items);
+    reserved = prepared.reserved;
     const { token, tokenStr, date } = await getNextToken("walkin");
+
     let userId = null;
     let guestInfo = { name: "", phone: "" };
     if (existingUserId) {
@@ -1016,22 +1236,42 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
       }
       guestInfo = { name: guestName || "", phone: guestPhone || "" };
     }
+
     const order = new Order({
-      userId, guestInfo, orderType: "walk-in",
-      items, total: Number(total),
+      userId,
+      guestInfo,
+      orderType: "walk-in",
+      items: prepared.items,
+      total: prepared.total,
       paymentMethod: paymentMethod || "cash",
-      status: "Completed", tokenNumber: token, tokenStr, tokenDate: date,
+      status: "Completed",
+      tokenNumber: token,
+      tokenStr,
+      tokenDate: date,
     });
+
     await order.save();
-    for (const item of items) {
-      await Medicine.findOneAndUpdate({ name: item.name, isActive: true }, { $inc: { stock: -(item.quantity || 1) } });
-    }
     if (userId) await order.populate("userId", "name email phone");
-    logActivity(req, "walkin_order_created", `Walk-in order for ${guestName || "linked user"} | Token: ${tokenStr} | Rs.${total}`, { orderId: order._id, tokenStr, total, customer: guestName });
+
+    logActivity(
+      req,
+      "walkin_order_created",
+      `Walk-in order for ${guestName || "linked user"} | Token: ${tokenStr} | Rs.${prepared.total}`,
+      { orderId: order._id, tokenStr, total: prepared.total, customer: guestName }
+    );
+
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
+    for (const item of reserved) {
+      await Medicine.updateOne(
+        { _id: item.id },
+        { $inc: { stock: item.quantity }, $set: { updatedAt: new Date() } }
+      );
+    }
     console.error("Walk-in error:", err);
-    res.status(500).json({ message: "Error creating walk-in order" });
+    res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Error creating walk-in order",
+    });
   }
 });
 
