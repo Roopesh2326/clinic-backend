@@ -31,11 +31,12 @@ const CounterSchema = new mongoose.Schema({
     required: true,
   },
 
+  // Keep token counters long enough to cover future-dated appointments.
+  // Removing the TTL prevents a counter for a future appointment date from
+  // disappearing before that appointment occurs.
   createdAt: {
     type: Date,
     default: Date.now,
-    // Auto-delete counter documents after 7 days (cleanup old dates)
-    expires: 60 * 60 * 24 * 7,
   },
 });
 
