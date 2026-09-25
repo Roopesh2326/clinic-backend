@@ -1079,6 +1079,12 @@ app.post("/orders", authenticateToken, async (req, res) => {
       tokenStr,
     });
   } catch (err) {
+    for (const item of reserved) {
+      await Medicine.updateOne(
+        { _id: item.id },
+        { $inc: { stock: item.quantity }, $set: { updatedAt: new Date() } }
+      );
+    }
     console.error("Order error:", err);
     res.status(err.statusCode || 500).json({
       message: err.statusCode ? err.message : "Error saving order. Please try again.",
