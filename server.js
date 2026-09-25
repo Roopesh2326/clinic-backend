@@ -129,7 +129,10 @@ app.use(generalLimiter);
 // ─── MONGODB ──────────────────────────────────────────────────────────────────
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => console.log("MongoDB connected"))
+  .then(async () => {
+    await Counter.syncIndexes();
+    console.log("MongoDB connected");
+  })
   .catch((err) => { console.error("MongoDB connection failed:", err); process.exit(1); });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
@@ -385,7 +388,7 @@ app.get("/appointments/today", async (req, res) => {
   }
 });
 
-app.get("/queue/today", authenticateToken, async (req, res) => {
+app.get("/queue/today", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const today = getTodayIST();
     const state = await ensureQueueState("appointment", today);
@@ -876,7 +879,7 @@ const handleBookAppointment = async (req, res) => {
 app.post("/appointment",  handleBookAppointment); // legacy route
 app.post("/appointments", handleBookAppointment); // new route used by Appointment.jsx
 
-app.get("/appointments", authenticateToken, requireAdmin, async (req, res) => {
+app.get("/appointments", authenticateToken, requireClinicStaff, async (req, res) => {
   try {
     const apts = await Appointment.find().sort({ bookedAt: -1 }).populate("userId", "name email phone");
     res.json(apts);
