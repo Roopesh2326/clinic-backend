@@ -1093,6 +1093,7 @@ app.post("/orders", authenticateToken, async (req, res) => {
 });
 
 app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) => {
+  let reserved = [];
   try {
     const { paymentMethod, guestName, guestPhone, existingUserId } = req.body;
     if (paymentMethod && !["cash", "upi", "card"].includes(paymentMethod)) {
@@ -1102,6 +1103,7 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
       return res.status(400).json({ message: "Customer name is required" });
 
     const prepared = await prepareOrderItems(req.body.items);
+    reserved = prepared.reserved;
     const { token, tokenStr, date } = await getNextToken("walkin");
 
     let userId = null;
@@ -1141,6 +1143,12 @@ app.post("/orders/walk-in", authenticateToken, requireStaff, async (req, res) =>
 
     res.status(201).json({ message: "Walk-in order created successfully", order });
   } catch (err) {
+    for (const item of reserved) {
+      await Medicine.updateOne(
+        { _id: item.id },
+        { $inc: { stock: item.quantity }, $set: { updatedAt: new Date() } }
+      );
+    }
     console.error("Walk-in error:", err);
     res.status(err.statusCode || 500).json({
       message: err.statusCode ? err.message : "Error creating walk-in order",
