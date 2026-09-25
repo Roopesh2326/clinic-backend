@@ -504,14 +504,40 @@ app.post("/queue/next", authenticateToken, requireClinicStaff, async (req, res) 
       logActivity(req, "queue_next", "Advanced " + type + " queue", { type, tokenNumber: servedToken });
     }
 
-    const updatedState = await QueueState.findOneAndUpdate(
-      { type },
-      {
-        $max: { currentServing: servedToken },
-        $set: { queueDate: today, lastUpdated: new Date() },
-      },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
+    let updatedState;
+    if (type === "appointment") {
+      // Appointment claiming above already selects a unique document, so the
+      // pointer can safely move forward to that token number.
+      updatedState = await QueueState.findOneAndUpdate(
+        { type, queueDate: today },
+        {
+          $max: { currentServing: servedToken },
+          $set: { lastUpdated: new Date() },
+        },
+        { new: true }
+      );
+    } else {
+      // Order/walk-in queues use a pure token pointer. The conditional
+      // atomic increment prevents two staff screens from serving the same
+      // pointer under concurrent clicks.
+      updatedState = await QueueState.findOneAndUpdate(
+        { type, queueDate: today, currentServing: { $lt: totalIssued } },
+        {
+          $inc: { currentServing: 1 },
+          $set: { lastUpdated: new Date() },
+        },
+        { new: true }
+      );
+    }
+
+    if (!updatedState) {
+      return res.status(409).json({
+        message: "Queue changed before this action completed. Refresh and try again.",
+        type,
+        currentServing: Math.min(state.currentServing || 0, totalIssued),
+        totalIssued,
+      });
+    }
 
     const finalServing = Math.min(updatedState.currentServing || 0, totalIssued);
     const payload = {
