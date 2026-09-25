@@ -137,13 +137,15 @@ mongoose
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
 const authenticateToken = (req, res, next) => {
-  // Check HTTP-only cookie first, then Authorization header
-  let token = req.cookies?.token;
-  if (!token) {
-    const authHeader = req.headers["authorization"];
-    if (authHeader?.startsWith("Bearer ")) token = authHeader.split(" ")[1];
-  }
+  // Prefer the explicit Bearer token. Mobile browsers can retain a stale
+  // cross-origin cookie; an invalid cookie must not override a valid JWT.
+  const authHeader = req.headers["authorization"];
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const cookieToken = req.cookies?.token;
+  const token = bearerToken || cookieToken;
+
   if (!token) return res.status(401).json({ message: "Access denied" });
+
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ message: "Invalid token" });
     req.user = user;
