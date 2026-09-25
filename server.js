@@ -835,7 +835,8 @@ app.delete("/users/:id", authenticateToken, requireAdmin, async (req, res) => {
 // Shared handler used by both POST /appointment and POST /appointments
 const handleBookAppointment = async (req, res) => {
   try {
-    const appointmentDate = normalizeQueueDate(req.body.date);\n    const { token, tokenStr, date } = await getNextToken("appointment", appointmentDate);
+    const appointmentDate = normalizeQueueDate(req.body.date);
+    const { token, tokenStr, date } = await getNextToken("appointment", appointmentDate);
     const isReception = String(req.body.source || "").toLowerCase() === "reception";
     const apt = new Appointment({
       name:        String(req.body.name    || "").trim(),
