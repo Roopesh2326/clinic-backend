@@ -1374,9 +1374,31 @@ app.patch("/staff/orders/:id/status", authenticateToken, requireStaff, async (re
     const { status } = req.body;
     if (!["Approved", "Completed"].includes(status))
       return res.status(403).json({ message: "Staff can only set Approved or Completed" });
-    const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true }).populate("userId", "name email phone");
-    if (!order) return res.status(404).json({ message: "Order not found" });
-    logActivity(req, "order_status_changed", `Staff ${req.user.email} changed order #${order._id.toString().slice(-6).toUpperCase()} → ${status}`, { orderId: req.params.id, newStatus: status, changedBy: req.user.email });
+
+    // Enforce the same workflow at the API boundary as the staff UI:
+    // Pending -> Approved -> Completed. A direct API call cannot skip or
+    // rewind a staff-managed order state.
+    const requiredCurrentStatus = status === "Approved" ? "Pending" : "Approved";
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.id, status: requiredCurrentStatus },
+      { $set: { status } },
+      { new: true }
+    ).populate("userId", "name email phone");
+
+    if (!order) {
+      const existing = await Order.findById(req.params.id).select("status");
+      if (!existing) return res.status(404).json({ message: "Order not found" });
+      return res.status(409).json({
+        message: `Cannot move order from ${existing.status} to ${status}. Expected current status: ${requiredCurrentStatus}.`,
+      });
+    }
+
+    logActivity(
+      req,
+      "order_status_changed",
+      `Staff ${req.user.email} changed order #${order._id.toString().slice(-6).toUpperCase()} → ${status}`,
+      { orderId: req.params.id, previousStatus: requiredCurrentStatus, newStatus: status, changedBy: req.user.email }
+    );
     res.json({ message: "Status updated", order });
   } catch {
     res.status(500).json({ message: "Error updating order status" });
