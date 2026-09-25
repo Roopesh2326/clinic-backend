@@ -36,4 +36,4 @@ const OrderSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-module.exports = mongoose.model("Order", OrderSchema);
+// Staff/Admin order lists sort newest-first; index this access pattern to avoid collection scans.\nOrderSchema.index({ createdAt: -1 });\n\nmodule.exports = mongoose.model("Order", OrderSchema);
